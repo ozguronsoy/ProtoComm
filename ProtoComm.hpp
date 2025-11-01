@@ -109,42 +109,56 @@ namespace ProtoComm
 
 #pragma endregion Messages
 
-#pragma region Frame Validators
+#pragma region Frame Handlers
 
     /**
-     * @brief Interface for a frame validator functor.
+     * @brief Provides methods for frame validation and sealing.
      *
-     * This class defines the abstract interface for a functor
-     * responsible for validating the integrity of a raw data frame.
      */
-    class IFrameValidator
+    class IFrameHandler
     {
     public:
-        virtual ~IFrameValidator() = default;
+        virtual ~IFrameHandler() = default;
 
         /**
-         * @brief Validates a raw data frame against a message's rules.
+         * @brief Validates an incoming raw data frame.
          *
-         * @param msg The message definition, used to get validation rules
-         * (e.g., header/footer patterns).
-         * @param frame The raw data frame to be validated.
-         * @return true if the frame is valid, false otherwise.
+         * @param msg A const reference to the `IRxMessage` type, used
+         * to retrieve validation rules (e.g., `HeaderPattern()`).
+         *
+         * @param frame Raw frame to be validated.
+         * @return true if the frame's integrity is valid, false otherwise.
          */
-        virtual bool operator()(const IMessage& msg, std::span<const uint8_t> frame) = 0;
+        virtual bool Validate(const IRxMessage& msg, std::span<const uint8_t> frame) const = 0;
+
+        /**
+         * @brief Finalizes ("seals") an outgoing raw data frame.
+         *
+         * @param msg A const reference to the `ITxMessage` type, used
+         * to retrieve frame rules (e.g., `HeaderPattern()`).
+         *
+         * @param frame Raw frame that will be modified in-place.
+         */
+        virtual void Seal(const ITxMessage& msg, std::span<uint8_t> frame) const = 0;
     };
 
     /**
-     * @brief A basic frame validator that checks for frame size, header and footer patterns.
+     * @brief A base implementation of IFrameHandler that validates and seals
+     * frame headers and footers.
      *
-     * This class provides a concrete implementation of IFrameValidator that
-     * only validates the frame size and the presence of correct header and footer byte patterns.
+     * This class provides the fundamental logic for checking
+     * header/footer patterns on `Validate` and writing them on `Seal`.
+     *
+     * It is intended to be used as a base class for more specialized
+     * handlers (like `ChecksumFrameHandler`), which can call these
+     * methods before adding their own logic (e.g., checksum validation).
      */
-    class FrameValidator : public IFrameValidator
+    class FrameHandler : public IFrameHandler
     {
     public:
-        virtual ~FrameValidator() = default;
+        virtual ~FrameHandler() = default;
 
-        virtual bool operator()(const IMessage& msg, std::span<const uint8_t> frame) override
+        virtual bool Validate(const IRxMessage& msg, std::span<const uint8_t> frame) const override
         {
             const auto frameSize = msg.FrameSize();
             if (frameSize.has_value() && frame.size() != (*frameSize))
@@ -155,40 +169,68 @@ namespace ProtoComm
                 return false;
 
             auto footerPattern = msg.FooterPattern();
-            if (footerPattern.size() > 0 && !std::equal(footerPattern.begin(), footerPattern.end(), (frame.end() - footerPattern.size())))
+            if (!footerPattern.empty() && !std::equal(footerPattern.begin(), footerPattern.end(), (frame.end() - footerPattern.size())))
                 return false;
 
             return true;
         }
+
+        virtual void Seal(const ITxMessage& msg, std::span<uint8_t> frame) const override
+        {
+            auto headerPattern = msg.HeaderPattern();
+            (void)std::copy(headerPattern.begin(), headerPattern.end(), frame.begin());
+
+            auto footerPattern = msg.FooterPattern();
+            if (!footerPattern.empty())
+            {
+                (void)std::copy(footerPattern.rbegin(), footerPattern.rend(), frame.rbegin());
+            }
+        }
     };
 
     /**
-     * @brief A specialized validator that checks headers, footers, and a checksum.
+     * @brief A specialized `IFrameHandler` that adds checksum validation.
      *
-     * @tparam TChecksum The data type of the checksum (e.g., uint8_t, uint16_t).
-     * @tparam TData The data type of the elements being summed (default: uint8_t).
-     * @tparam init The initial value for the checksum calculation (default: 0).
-     * @tparam BinaryOp The binary operation for checksum calculation (default: std::plus).
+     * @tparam TChecksum The data type of the checksum itself (e.g., `uint8_t`, `uint16_t`).
+     * @tparam TData The data type of the payload elements being summed (default: `uint8_t`).
+     * @tparam init The initial value for the binary operation (default: 0).
+     * @tparam BinaryOp The binary operation to use (default: `std::plus<TData>`).
      */
     template<typename TChecksum = uint8_t, typename TData = uint8_t, TData init = 0, typename BinaryOp = std::plus<TData>>
         requires std::is_arithmetic_v<TChecksum>&& std::is_arithmetic_v<TData>
-    class ChecksumValidator : public FrameValidator
+    class ChecksumFrameHandler : public IFrameHandler
     {
     public:
-        virtual bool operator()(const IMessage& msg, std::span<const uint8_t>& frame) override
-        {
-            if (!FrameValidator::operator()(msg, frame))
-                return false;
+        virtual ~ChecksumFrameHandler() = default;
 
+        TChecksum CalculateChecksum(const IMessage& msg, std::span<const uint8_t> frame) const
+        {
             auto payloadBegin = frame.begin() + msg.HeaderPattern().size();
             auto payloadEnd = frame.end() - msg.FooterPattern().size() - sizeof(TChecksum);
+            return static_cast<TChecksum>(std::accumulate(payloadBegin, payloadEnd, init, BinaryOp()));
+        }
 
+        virtual bool Validate(const IRxMessage& msg, std::span<const uint8_t> frame) const override
+        {
+            if (!FrameHandler::Validate(msg, frame))
+                return false;
+
+            auto checksumPosition = frame.end() - msg.FooterPattern().size() - sizeof(TChecksum);
             TChecksum expected;
-            std::memcpy(&expected, &(*payloadEnd), sizeof(TChecksum));
+            (void)std::memcpy(&expected, &(*checksumPosition), sizeof(TChecksum));
 
-            const TChecksum calculated = static_cast<TChecksum>(std::accumulate(payloadBegin, payloadEnd, init, BinaryOp()));
+            const TChecksum calculated = this->CalculateChecksum(msg, frame);
 
             return calculated == expected;
+        }
+
+        virtual void Seal(const ITxMessage& msg, std::span<uint8_t> frame) const override
+        {
+            FrameHandler::Seal(msg, frame);
+
+            const TChecksum checksum = this->CalculateChecksum(msg, frame);
+            auto checksumPosition = frame.end() - msg.FooterPattern().size() - sizeof(TChecksum);
+            (void)std::memcpy(&(*checksumPosition), &checksum, sizeof(TChecksum));
         }
     };
 
@@ -237,22 +279,24 @@ namespace ProtoComm
      * @tparam TxMessage The concrete transmittable message type.
      * This type must be derived from `ProtoComm::ITxMessage`.
      *
-     * @tparam Validator The concrete frame validator type (e.g.,
-     * `ChecksumFrameValidator`). This type must be derived from `ProtoComm::IFrameValidator`.
+     * @tparam _FrameHandler The concrete frame handler type responsible
+     * for validating incoming (Rx) frames and sealing outgoing (Tx)
+     * frames. This type must be derived from `ProtoComm::IFrameHandler`.
+     * (e.g., `ChecksumFrameHandler`). Defaults to `FrameHandler`.
      *
      */
-    template<typename Protocol, typename RxMessage, typename TxMessage, typename Validator = FrameValidator>
+    template<typename Protocol, typename RxMessage, typename TxMessage, typename _FrameHandler = FrameHandler>
         requires
     IsCommProtocol<Protocol>&&
         std::derived_from<RxMessage, IRxMessage>&&
         std::derived_from<TxMessage, ITxMessage>&&
-        std::derived_from<Validator, IFrameValidator>
+        std::derived_from<_FrameHandler, IFrameHandler>
 
         class CommStream final
     {
     private:
         Protocol m_protocol;
-        Validator m_validator;
+        _FrameHandler m_frameHandler;
 
         std::vector<uint8_t> m_rxBuffer;
 
@@ -431,7 +475,7 @@ namespace ProtoComm
                     if (itFrameStart == m_rxBuffer.end())
                         break;
 
-                    if (m_rxFooterPattern.size() != 0)
+                    if (!m_rxFooterPattern.empty())
                     {
                         itFrameEnd = std::search((itFrameStart + m_rxHeaderPattern.size()), m_rxBuffer.end(), m_rxFooterPattern.begin(), m_rxFooterPattern.end());
                         itFrameEnd += m_rxFooterPattern.size();
@@ -450,7 +494,7 @@ namespace ProtoComm
                         break;
 
                     const std::span<const uint8_t> frame(itFrameStart, itFrameEnd);
-                    if (m_validator(RxMessage(), frame))
+                    if (m_frameHandler.Validate(RxMessage(), frame))
                     {
                         RxMessage& msg = messages.emplace_back();
                         msg.Unpack(frame);
