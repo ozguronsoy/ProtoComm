@@ -68,15 +68,10 @@ namespace ProtoComm
     class IRxMessage : public IMessage
     {
     public:
-        using Frame = typename IMessage;
-
         virtual ~IRxMessage() = default;
 
         /**
          * @brief Unpacks (deserializes) data from a raw frame into this object.
-         *
-         * The implementation of this pure virtual function should parse the
-         * provided 'frame' and populate the members of the derived class.
          *
          * @param frame The raw data frame received from the communication channel.
          */
@@ -92,19 +87,15 @@ namespace ProtoComm
      */
     class ITxMessage : public IMessage
     {
+    public:
         virtual ~ITxMessage() = default;
 
         /**
          * @brief Packs (serializes) the data from this object into a raw frame.
          *
-         * The implementation of this pure virtual function should fill the
-         * provided 'frame' with the data held in the derived class members.
-         * This method is 'const' as it should not modify the state of the
-         * message object itself, only write its state into the frame.
-         *
          * @param frame The raw data frame that will be filled and sent over the communication channel.
          */
-        virtual void Pack(std::span<uint8_t> frame) const = 0;
+        virtual void Pack(std::vector<uint8_t>& frame) const = 0;
     };
 
 #pragma endregion Messages
@@ -189,7 +180,7 @@ namespace ProtoComm
     };
 
     /**
-     * @brief A specialized `IFrameHandler` that adds checksum validation.
+     * @brief A specialized `FrameHandler` that adds checksum validation.
      *
      * @tparam TChecksum The data type of the checksum itself (e.g., `uint8_t`, `uint16_t`).
      * @tparam TData The data type of the payload elements being summed (default: `uint8_t`).
@@ -198,7 +189,7 @@ namespace ProtoComm
      */
     template<typename TChecksum = uint8_t, typename TData = uint8_t, TData init = 0, typename BinaryOp = std::plus<TData>>
         requires std::is_arithmetic_v<TChecksum>&& std::is_arithmetic_v<TData>
-    class ChecksumFrameHandler : public IFrameHandler
+    class ChecksumFrameHandler : public FrameHandler
     {
     public:
         virtual ~ChecksumFrameHandler() = default;
@@ -243,14 +234,14 @@ namespace ProtoComm
      *
      */
     template<typename T>
-    concept IsCommProtocol = requires(T t, size_t ch, std::span<uint8_t> buf, std::span<const uint8_t> cbuf)
+    concept IsCommProtocol = requires(T t, const T ct, size_t ch, std::span<uint8_t> buf, std::span<const uint8_t> cbuf)
     {
-        { t.IsRunning() } -> std::same_as<bool>;
-        { t.Stop() };
-        { t.ChannelCount() } -> std::same_as<size_t>;
-        { t.AvailableReadSize(ch) } -> std::same_as<size_t>;
+        { ct.IsRunning() } -> std::same_as<bool>;
+        { t.Stop() } -> std::same_as<void>;
+        { ct.ChannelCount() } -> std::same_as<size_t>;
+        { ct.AvailableReadSize(ch) } -> std::same_as<size_t>;
         { t.Read(ch, buf) }     -> std::same_as<size_t>;
-        { t.Write(ch, cbuf) };
+        { t.Write(ch, cbuf) } -> std::same_as<void>;
     };
 
     /**
@@ -351,7 +342,7 @@ namespace ProtoComm
          *
          * @return A reference to the internal `Protocol` instance.
          */
-        const Protocol& Protocol() const
+        const Protocol& GetProtocol() const
         {
             return m_protocol;
         }
@@ -429,7 +420,7 @@ namespace ProtoComm
             using clock = std::chrono::high_resolution_clock;
             using time_point = clock::time_point;
 
-            constexpr std::chrono::milliseconds pollingPeriod = 10;
+            constexpr std::chrono::milliseconds pollingPeriod = std::chrono::milliseconds(10);
 
             std::vector<RxMessage> messages;
             const time_point t1 = clock::now();
@@ -565,7 +556,16 @@ namespace ProtoComm
          */
         void Write(size_t ch, std::span<const TxMessage> messages)
         {
-            // TODO
+            std::vector<uint8_t> frame((m_txFrameSize.has_value()) ? (*m_txFrameSize) : (0));
+            for (const TxMessage& msg : messages)
+            {
+                if (!m_txFrameSize.has_value())
+                    frame.clear();
+
+                msg.Pack(frame);
+                m_frameHandler.Seal(msg, std::span<uint8_t>(frame.begin(), frame.end()));
+                m_protocol.Write(ch, std::span<const uint8_t>(frame.begin(), frame.end()));
+            }
         }
     };
 
