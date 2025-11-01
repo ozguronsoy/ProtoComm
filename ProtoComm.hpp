@@ -199,6 +199,10 @@ namespace ProtoComm
 
 #pragma region Comm
 
+    /**
+     * @brief Specifies the requirements for a communication protocol.
+     *
+     */
     template<typename T>
     concept IsCommProtocol = requires(T t, std::span<uint8_t> buf, std::span<const uint8_t> cbuf)
     {
@@ -209,51 +213,74 @@ namespace ProtoComm
         { t.Write(cbuf) };
     };
 
-    // Specifies the type ``T`` has a ``Connect`` method that takes ``Args`` parameters.
+    /**
+     * @brief Specifies the type ``T`` has a ``Connect`` method that takes ``Args`` parameters.
+     *
+     */
     template<typename T, typename... Args>
     concept Connectable = requires(T t, Args... args)
     {
         { t.Connect(std::forward<Args>(args)...) } -> std::same_as<bool>;
     };
 
-    // alternative naming to CommHandler
+    /**
+     * @brief Manages a high-level, message-based communication channel.
+     *
+     * This class is the primary user-facing component of the ProtoComm library.
+     * It handles connection management, frame parsing, and validation,
+     * allowing the user to work directly with their defined message objects.
+     *
+     * @tparam Protocol The concrete transport protocol type (e.g., `TcpClient`, `SerialPort`).
+     * This type must satisfy the `IsCommProtocol` concept.
+     *
+     * @tparam RxMessage The concrete receivable message type.
+     * This type must be derived from `ProtoComm::IRxMessage`.
+     *
+     * @tparam TxMessage The concrete transmittable message type.
+     * This type must be derived from `ProtoComm::ITxMessage`.
+     *
+     * @tparam Validator The concrete frame validator type (e.g.,
+     * `ChecksumFrameValidator`). This type must be derived from `ProtoComm::IFrameValidator`.
+     *
+     */
     template<typename Protocol, typename RxMessage, typename TxMessage, typename Validator = FrameValidator>
-        requires IsCommProtocol<Protocol>&&
-    std::derived_from<RxMessage, IRxMessage>&&
+        requires
+    IsCommProtocol<Protocol>&&
+        std::derived_from<RxMessage, IRxMessage>&&
         std::derived_from<TxMessage, ITxMessage>&&
-        std::derived_from<Validator, FrameValidator>
+        std::derived_from<Validator, IFrameValidator>
 
         class CommStream final
     {
     private:
-        Protocol protocol;
-        Validator validator;
+        Protocol m_protocol;
+        Validator m_validator;
 
-        std::vector<uint8_t> rxBuffer;
+        std::vector<uint8_t> m_rxBuffer;
 
-        std::optional<size_t> rxFrameSize;
-        std::span<const uint8_t> rxHeaderPattern;
-        std::span<const uint8_t> rxFooterPattern;
+        std::optional<size_t> m_rxFrameSize;
+        std::span<const uint8_t> m_rxHeaderPattern;
+        std::span<const uint8_t> m_rxFooterPattern;
 
-        std::optional<size_t> txFrameSize;
-        std::span<const uint8_t> txHeaderPattern;
-        std::span<const uint8_t> txFooterPattern;
+        std::optional<size_t> m_txFrameSize;
+        std::span<const uint8_t> m_txHeaderPattern;
+        std::span<const uint8_t> m_txFooterPattern;
 
     public:
         CommStream()
         {
             {
                 RxMessage msg;
-                rxFrameSize = msg.FrameSize();
-                rxHeaderPattern = msg.HeaderPattern();
-                rxFooterPattern = msg.FooterPattern();
+                m_rxFrameSize = msg.FrameSize();
+                m_rxHeaderPattern = msg.HeaderPattern();
+                m_rxFooterPattern = msg.FooterPattern();
 
-                if (rxHeaderPattern.size() == 0)
+                if (m_rxHeaderPattern.size() == 0)
                 {
                     throw std::runtime_error("all frames must have a header");
                 }
 
-                if (!rxFrameSize.has_value() && rxFooterPattern.size() == 0)
+                if (!m_rxFrameSize.has_value() && m_rxFooterPattern.size() == 0)
                 {
                     throw std::runtime_error("variable-sized frames must have a footer");
                 }
@@ -261,58 +288,75 @@ namespace ProtoComm
 
             {
                 TxMessage msg;
-                txFrameSize = msg.FrameSize();
-                txHeaderPattern = msg.HeaderPattern();
-                txFooterPattern = msg.FooterPattern();
+                m_txFrameSize = msg.FrameSize();
+                m_txHeaderPattern = msg.HeaderPattern();
+                m_txFooterPattern = msg.FooterPattern();
 
-                if (txHeaderPattern.size() == 0)
+                if (m_txHeaderPattern.size() == 0)
                 {
                     throw std::runtime_error("all frames must have a header");
                 }
 
-                if (!txFrameSize.has_value() && txFooterPattern.size() == 0)
+                if (!m_txFrameSize.has_value() && m_txFooterPattern.size() == 0)
                 {
                     throw std::runtime_error("variable-sized frames must have a footer");
                 }
             }
         }
 
+        /**
+         * @brief Establishes a connection using the underlying protocol.
+         *
+         * @tparam Args The types of arguments required by the protocol's `Connect` method.
+         * @param args The arguments required by the protocol's `Connect` method.
+         * @return `true` if the connection was successful, `false` if it failed or if the stream was already connected.
+         */
         template<typename... Args>
             requires Connectable<Protocol, Args...>
-        bool Connect(Args... args)
+        bool Start(Args... args)
         {
-            if (protocol.IsConnected()) return false;
-            return protocol.Connect(std::forward<Args>(args)...);
+            if (m_protocol.IsConnected())
+                return false;
+            return m_protocol.Connect(std::forward<Args>(args)...);
         }
 
-        void Disconnect()
+        /**
+         * @brief Disconnects the stream.
+         *
+         */
+        void Stop()
         {
-            if (protocol.IsConnected())
-                protocol.Disconnect();
+            if (m_protocol.IsConnected())
+                m_protocol.Disconnect();
         }
 
+        /**
+         * @brief Reads available data, parses messages, and returns them.
+         *
+         * @return A vector containing all messages that were successfully parsed in this cycle.
+         */
         std::vector<RxMessage> Read()
         {
             std::vector<RxMessage> messages;
 
-            const size_t readSize = protocol.AvailableReadSize();
-            const size_t rxBufferOldSize = rxBuffer.size();
-            rxBuffer.resize(rxBufferOldSize + readSize);
+            const size_t readSize = m_protocol.AvailableReadSize();
+            const size_t rxBufferOldSize = m_rxBuffer.size();
+            m_rxBuffer.resize(rxBufferOldSize + readSize);
 
-            (void)protocol.Read(std::span<uint8_t>(rxBuffer.begin() + rxBufferOldSize, readSize));
+            (void)m_protocol.Read(std::span<uint8_t>(m_rxBuffer.begin() + rxBufferOldSize, readSize));
 
-            auto itHeader = rxBuffer.begin();
-            auto itFooter = rxBuffer.begin();
+            auto itHeader = m_rxBuffer.begin();
+            auto itFooter = m_rxBuffer.begin();
             do
             {
-                itHeader = std::search(itHeader, rxBuffer.end(), rxHeaderPattern.begin(), rxHeaderPattern.end());
-                if (itHeader == rxBuffer.end())
+                itHeader = std::search(itHeader, m_rxBuffer.end(), m_rxHeaderPattern.begin(), m_rxHeaderPattern.end());
+                if (itHeader == m_rxBuffer.end())
                     break;
 
-                if (rxFooterPattern.size() != 0)
+                if (m_rxFooterPattern.size() != 0)
                 {
-                    itFooter = std::search(itHeader, rxBuffer.end(), rxFooterPattern.begin(), rxFooterPattern.end());
-                    if (rxFrameSize.has_value() && std::distance(itHeader, itFooter) != (*rxFrameSize)) // fixed-size mismatch, drop frame
+                    itFooter = std::search(itHeader, m_rxBuffer.end(), m_rxFooterPattern.begin(), m_rxFooterPattern.end());
+                    if (m_rxFrameSize.has_value() && std::distance(itHeader, itFooter) != (*m_rxFrameSize)) // fixed-size mismatch, drop frame
                     {
                         itHeader++;
                         continue;
@@ -320,13 +364,13 @@ namespace ProtoComm
                 }
                 else
                 {
-                    itFooter = itHeader + (*rxFrameSize);
+                    itFooter = itHeader + (*m_rxFrameSize);
                 }
 
-                if (itFooter >= rxBuffer.end())
+                if (itFooter >= m_rxBuffer.end())
                     break;
 
-                if (validator(RxMessage(), std::span<const uint8_t>(itHeader, itFooter)))
+                if (m_validator(RxMessage(), std::span<const uint8_t>(itHeader, itFooter)))
                 {
                     RxMessage& msg = messages.emplace_back();
                     msg.Unpack(RxMessage::Frame(itHeader, itFooter));
@@ -334,26 +378,45 @@ namespace ProtoComm
 
                 itHeader++;
 
-            } while (itHeader != rxBuffer.end());
+            } while (itHeader != m_rxBuffer.end());
 
             // move the header to the begining of the rx buffer
-            if (itHeader != rxBuffer.begin())
+            if (itHeader == m_rxBuffer.end())
             {
-                auto it = std::move(itHeader, rxBuffer.end(), rxBuffer.begin());
-                (void)rxBuffer.erase(it, rxBuffer.end());
+                // TODO do not remove the header bytes 
+                // if only a part of the header is arrived. 
+                // (e.g., hadder pattern is ``AA BB CC DD``, and only ``AA BB`` part is arrived and ``CC DD`` will arrive in next read)
+                m_rxBuffer.clear();
+            }
+            else if (itHeader != m_rxBuffer.begin())
+            {
+                auto it = std::move(itHeader, m_rxBuffer.end(), m_rxBuffer.begin());
+                (void)m_rxBuffer.erase(it, m_rxBuffer.end());
             }
 
             return messages;
         }
 
+        /**
+         * @brief Writes a single message to the stream.
+         *
+         * @param msg The message to be transmitted.
+         *
+         */
         void Write(const TxMessage& msg)
         {
             this->Write(std::span<const TxMessage>(&msg, 1));
         }
 
+        /**
+         * @brief Writes a batch of messages to the stream.
+         *
+         * @param messages The messages to be transmitted.
+         *
+         */
         void Write(std::span<const TxMessage> messages)
         {
-
+            // TODO
         }
     };
 
