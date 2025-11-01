@@ -13,6 +13,7 @@
 #include <chrono>
 #include <thread>
 #include <stdexcept>
+#include <format>
 
 namespace ProtoComm
 {
@@ -200,23 +201,24 @@ namespace ProtoComm
      *
      */
     template<typename T>
-    concept IsCommProtocol = requires(T t, std::span<uint8_t> buf, std::span<const uint8_t> cbuf)
+    concept IsCommProtocol = requires(T t, size_t ch, std::span<uint8_t> buf, std::span<const uint8_t> cbuf)
     {
-        { t.IsConnected() } -> std::same_as<bool>;
-        { t.Disconnect() };
-        { t.AvailableReadSize() } -> std::same_as<size_t>;
-        { t.Read(buf) }     -> std::same_as<size_t>;
-        { t.Write(cbuf) };
+        { t.IsRunning() } -> std::same_as<bool>;
+        { t.Stop() };
+        { t.ChannelCount() } -> std::same_as<size_t>;
+        { t.AvailableReadSize(ch) } -> std::same_as<size_t>;
+        { t.Read(ch, buf) }     -> std::same_as<size_t>;
+        { t.Write(ch, cbuf) };
     };
 
     /**
-     * @brief Specifies the type ``T`` has a ``Connect`` method that takes ``Args`` parameters.
+     * @brief Specifies the type ``T`` has a ``Start`` method that takes ``Args`` parameters.
      *
      */
     template<typename T, typename... Args>
-    concept Connectable = requires(T t, Args... args)
+    concept Startable = requires(T t, Args... args)
     {
-        { t.Connect(std::forward<Args>(args)...) } -> std::same_as<bool>;
+        { t.Start(std::forward<Args>(args)...) } -> std::same_as<bool>;
     };
 
     /**
@@ -301,36 +303,71 @@ namespace ProtoComm
         }
 
         /**
-         * @brief Establishes a connection using the underlying protocol.
+         * @brief Gets the underlying communication protocol.
          *
-         * @tparam Args The types of arguments required by the protocol's `Connect` method.
-         * @param args The arguments required by the protocol's `Connect` method.
-         * @return `true` if the connection was successful, `false` if it failed or if the stream was already connected.
+         * @return A reference to the internal `Protocol` instance.
          */
-        template<typename... Args>
-            requires Connectable<Protocol, Args...>
-        bool Start(Args... args)
+        const Protocol& Protocol() const
         {
-            if (m_protocol.IsConnected())
-                return false;
-            return m_protocol.Connect(std::forward<Args>(args)...);
+            return m_protocol;
         }
 
         /**
-         * @brief Disconnects the stream.
+         * @brief Gets the current number of active channels from the protocol.
+         *
+         * @return The number of active channels.
+         */
+        size_t ChannelCount() const
+        {
+            return m_protocol.ChannelCount();
+        }
+
+        /**
+         * @brief Checks if the underlying protocol is currently running.
+         *
+         * @return true if the protocol is running, false otherwise.
+         */
+        bool IsRunning() const
+        {
+            return m_protocol.IsRunning();
+        }
+
+        /**
+         * @brief Starts the underlying communication protocol.
+         *
+         * @tparam Args The types of arguments required by the protocol's `Start` method.
+         * @param args The arguments required by the protocol's `Start` method.
+         * @return `true` if the protocol was started successfully, `false` if it failed or if it was already running.
+         */
+        template<typename... Args>
+            requires Startable<Protocol, Args...>
+        bool Start(Args... args)
+        {
+            if (this->IsRunning())
+                return false;
+            return m_protocol.Start(std::forward<Args>(args)...);
+        }
+
+        /**
+         * @brief Stops the underlying communication protocol.
          *
          */
         void Stop()
         {
-            if (m_protocol.IsConnected())
-                m_protocol.Disconnect();
+            if (this->IsRunning())
+                m_protocol.Stop();
         }
 
         /**
-         * @brief Blocks until 'n' messages are read or a timeout occurs.
+         * @brief Blocks until 'n' messages are read from a specific channel
+         * or a timeout occurs.
          *
          * This function attempts to read a specified number of messages from
-         * the stream, blocking the calling thread until the conditions are met.
+         * a specific channel, blocking the calling thread until the
+         * conditions are met.
+         *
+         * @param ch The channel index from which to read messages.
+         * This must be a value in the range `[0, CommStream::ChannelCount() - 1]`.
          *
          * @param n The desired number of messages to read.
          * @param timeout The maximum duration to wait for the messages.
@@ -341,11 +378,9 @@ namespace ProtoComm
          * timeout expires, even if fewer than 'n' messages were
          * received.
          *
-         * @return A vector containing the messages that
-         * were successfully parsed. This vector may contain fewer than 'n'
-         * messages (or be empty) if the timeout was reached.
+         * @return A vector containing the messages that were successfully parsed.
          */
-        std::vector<RxMessage> Read(size_t n = 1, std::chrono::milliseconds timeout = std::chrono::milliseconds::zero())
+        std::vector<RxMessage> Read(size_t ch, size_t n = 1, std::chrono::milliseconds timeout = std::chrono::milliseconds::zero())
         {
             using clock = std::chrono::high_resolution_clock;
             using time_point = clock::time_point;
@@ -354,6 +389,9 @@ namespace ProtoComm
 
             std::vector<RxMessage> messages;
             const time_point t1 = clock::now();
+
+            if (ch >= m_protocol.ChannelCount())
+                throw std::out_of_range(std::format("invalid channel index: {}", ch));
 
             if (n == 0)
                 return messages;
@@ -367,7 +405,7 @@ namespace ProtoComm
 
             do
             {
-                const size_t readSize = m_protocol.AvailableReadSize();
+                const size_t readSize = m_protocol.AvailableReadSize(ch);
                 if (readSize == 0)
                 {
                     std::this_thread::sleep_for(pollingPeriod);
@@ -377,7 +415,7 @@ namespace ProtoComm
                 const size_t rxBufferOldSize = m_rxBuffer.size();
                 m_rxBuffer.resize(rxBufferOldSize + readSize);
 
-                (void)m_protocol.Read(std::span<uint8_t>(m_rxBuffer.begin() + rxBufferOldSize, readSize));
+                (void)m_protocol.Read(ch, std::span<uint8_t>(m_rxBuffer.begin() + rxBufferOldSize, readSize));
                 if (m_rxFrameSize.has_value() && m_rxBuffer.size() < (*m_rxFrameSize))
                 {
                     std::this_thread::sleep_for(pollingPeriod);
@@ -461,23 +499,27 @@ namespace ProtoComm
         }
 
         /**
-         * @brief Writes a single message to the stream.
+         * @brief Writes a single message to a specific channel.
          *
-         * @param msg The message to be transmitted.
+         * @param ch The channel index which the message will be sent.
+         * This must be a value in the range `[0, CommStream::ChannelCount() - 1]`.
          *
+         * @param msg The message to be sent.
          */
-        void Write(const TxMessage& msg)
+        void Write(size_t ch, const TxMessage& msg)
         {
-            this->Write(std::span<const TxMessage>(&msg, 1));
+            this->Write(ch, std::span<const TxMessage>(&msg, 1));
         }
 
         /**
-         * @brief Writes a batch of messages to the stream.
+         * @brief Writes a batch of messages to a specific channel.
          *
-         * @param messages The messages to be transmitted.
+         * @param ch The channel index which the message will be sent.
+         * This must be a value in the range `[0, CommStream::ChannelCount() - 1]`.
          *
+         * @param messages The messages to be sent.
          */
-        void Write(std::span<const TxMessage> messages)
+        void Write(size_t ch, std::span<const TxMessage> messages)
         {
             // TODO
         }
