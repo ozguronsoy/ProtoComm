@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <type_traits>
 #include <concepts>
+#include <chrono>
+#include <thread>
 #include <stdexcept>
 
 namespace ProtoComm
@@ -18,18 +20,14 @@ namespace ProtoComm
 #pragma region Messages
 
     /**
-     * @brief Provides the core type definition 'Frame', which represents the underlying data buffer for a message.
+     * @brief Base interface for a communication message.
      *
+     * This class defines the common structural properties of a message's
+     * raw frame, such as its expected size and header/footer patterns.
      */
     class IMessage
     {
     public:
-        /**
-         * The underlying data buffer for the message.
-         *
-         */
-        using Frame = std::span<uint8_t>;
-
         virtual ~IMessage() = default;
 
         /**
@@ -81,7 +79,7 @@ namespace ProtoComm
          *
          * @param frame The raw data frame received from the communication channel.
          */
-        virtual void Unpack(const Frame& frame) = 0;
+        virtual void Unpack(std::span<const uint8_t> frame) = 0;
     };
 
     /**
@@ -93,9 +91,6 @@ namespace ProtoComm
      */
     class ITxMessage : public IMessage
     {
-    public:
-        using Frame = typename IMessage::Frame;
-
         virtual ~ITxMessage() = default;
 
         /**
@@ -106,9 +101,9 @@ namespace ProtoComm
          * This method is 'const' as it should not modify the state of the
          * message object itself, only write its state into the frame.
          *
-         * @param frame A reference to the raw data frame that will be filled and sent over the communication channel.
+         * @param frame The raw data frame that will be filled and sent over the communication channel.
          */
-        virtual void Pack(Frame& frame) const = 0;
+        virtual void Pack(std::span<uint8_t> frame) const = 0;
     };
 
 #pragma endregion Messages
@@ -118,7 +113,7 @@ namespace ProtoComm
     /**
      * @brief Interface for a frame validator functor.
      *
-     * This class defines the abstract interface for a callable object (functor)
+     * This class defines the abstract interface for a functor
      * responsible for validating the integrity of a raw data frame.
      */
     class IFrameValidator
@@ -134,7 +129,7 @@ namespace ProtoComm
          * @param frame The raw data frame to be validated.
          * @return true if the frame is valid, false otherwise.
          */
-        virtual bool operator()(const IMessage& msg, const IMessage::Frame& frame) = 0;
+        virtual bool operator()(const IMessage& msg, std::span<const uint8_t> frame) = 0;
     };
 
     /**
@@ -148,7 +143,7 @@ namespace ProtoComm
     public:
         virtual ~FrameValidator() = default;
 
-        virtual bool operator()(const IMessage& msg, const IMessage::Frame& frame) override
+        virtual bool operator()(const IMessage& msg, std::span<const uint8_t> frame) override
         {
             const auto frameSize = msg.FrameSize();
             if (frameSize.has_value() && frame.size() != (*frameSize))
@@ -176,9 +171,10 @@ namespace ProtoComm
      */
     template<typename TChecksum = uint8_t, typename TData = uint8_t, TData init = 0, typename BinaryOp = std::plus<TData>>
         requires std::is_arithmetic_v<TChecksum>&& std::is_arithmetic_v<TData>
-    class ChecksumValidator final : public FrameValidator
+    class ChecksumValidator : public FrameValidator
     {
-        bool operator()(const IMessage& msg, const IMessage::Frame& frame) override
+    public:
+        virtual bool operator()(const IMessage& msg, std::span<const uint8_t>& frame) override
         {
             if (!FrameValidator::operator()(msg, frame))
                 return false;
@@ -189,7 +185,7 @@ namespace ProtoComm
             TChecksum expected;
             std::memcpy(&expected, &(*payloadEnd), sizeof(TChecksum));
 
-            const TChecksum calculated = std::accumulate(payloadBegin, payloadEnd, init, BinaryOp());
+            const TChecksum calculated = static_cast<TChecksum>(std::accumulate(payloadBegin, payloadEnd, init, BinaryOp()));
 
             return calculated == expected;
         }
@@ -275,12 +271,12 @@ namespace ProtoComm
                 m_rxHeaderPattern = msg.HeaderPattern();
                 m_rxFooterPattern = msg.FooterPattern();
 
-                if (m_rxHeaderPattern.size() == 0)
+                if (m_rxHeaderPattern.empty())
                 {
                     throw std::runtime_error("all frames must have a header");
                 }
 
-                if (!m_rxFrameSize.has_value() && m_rxFooterPattern.size() == 0)
+                if (!m_rxFrameSize.has_value() && m_rxFooterPattern.empty())
                 {
                     throw std::runtime_error("variable-sized frames must have a footer");
                 }
@@ -292,12 +288,12 @@ namespace ProtoComm
                 m_txHeaderPattern = msg.HeaderPattern();
                 m_txFooterPattern = msg.FooterPattern();
 
-                if (m_txHeaderPattern.size() == 0)
+                if (m_txHeaderPattern.empty())
                 {
                     throw std::runtime_error("all frames must have a header");
                 }
 
-                if (!m_txFrameSize.has_value() && m_txFooterPattern.size() == 0)
+                if (!m_txFrameSize.has_value() && m_txFooterPattern.empty())
                 {
                     throw std::runtime_error("variable-sized frames must have a footer");
                 }
@@ -331,68 +327,135 @@ namespace ProtoComm
         }
 
         /**
-         * @brief Reads available data, parses messages, and returns them.
+         * @brief Blocks until 'n' messages are read or a timeout occurs.
          *
-         * @return A vector containing all messages that were successfully parsed in this cycle.
+         * This function attempts to read a specified number of messages from
+         * the stream, blocking the calling thread until the conditions are met.
+         *
+         * @param n The desired number of messages to read.
+         * @param timeout The maximum duration to wait for the messages.
+         * - If `std::chrono::milliseconds::zero()` (the default), this
+         * function will block indefinitely until exactly 'n'
+         * messages have been received.
+         * - If greater than zero, the function will return after the
+         * timeout expires, even if fewer than 'n' messages were
+         * received.
+         *
+         * @return A vector containing the messages that
+         * were successfully parsed. This vector may contain fewer than 'n'
+         * messages (or be empty) if the timeout was reached.
          */
-        std::vector<RxMessage> Read()
+        std::vector<RxMessage> Read(size_t n = 1, std::chrono::milliseconds timeout = std::chrono::milliseconds::zero())
         {
+            using clock = std::chrono::high_resolution_clock;
+            using time_point = clock::time_point;
+
+            constexpr std::chrono::milliseconds pollingPeriod = 10;
+
             std::vector<RxMessage> messages;
+            const time_point t1 = clock::now();
 
-            const size_t readSize = m_protocol.AvailableReadSize();
-            const size_t rxBufferOldSize = m_rxBuffer.size();
-            m_rxBuffer.resize(rxBufferOldSize + readSize);
+            if (n == 0)
+                return messages;
 
-            (void)m_protocol.Read(std::span<uint8_t>(m_rxBuffer.begin() + rxBufferOldSize, readSize));
+            // false if timeout reached
+            auto checkTimeout = [&timeout, &t1]() -> bool
+                {
+                    return (timeout == std::chrono::milliseconds::zero())
+                        || (std::chrono::duration_cast<std::chrono::milliseconds>(clock::now() - t1) < timeout);
+                };
 
-            auto itHeader = m_rxBuffer.begin();
-            auto itFooter = m_rxBuffer.begin();
             do
             {
-                itHeader = std::search(itHeader, m_rxBuffer.end(), m_rxHeaderPattern.begin(), m_rxHeaderPattern.end());
-                if (itHeader == m_rxBuffer.end())
-                    break;
-
-                if (m_rxFooterPattern.size() != 0)
+                const size_t readSize = m_protocol.AvailableReadSize();
+                if (readSize == 0)
                 {
-                    itFooter = std::search(itHeader, m_rxBuffer.end(), m_rxFooterPattern.begin(), m_rxFooterPattern.end());
-                    if (m_rxFrameSize.has_value() && std::distance(itHeader, itFooter) != (*m_rxFrameSize)) // fixed-size mismatch, drop frame
+                    std::this_thread::sleep_for(pollingPeriod);
+                    continue;
+                }
+
+                const size_t rxBufferOldSize = m_rxBuffer.size();
+                m_rxBuffer.resize(rxBufferOldSize + readSize);
+
+                (void)m_protocol.Read(std::span<uint8_t>(m_rxBuffer.begin() + rxBufferOldSize, readSize));
+                if (m_rxFrameSize.has_value() && m_rxBuffer.size() < (*m_rxFrameSize))
+                {
+                    std::this_thread::sleep_for(pollingPeriod);
+                    continue;
+                }
+
+
+                auto itFrameStart = m_rxBuffer.begin();
+                auto itFrameEnd = m_rxBuffer.begin();
+                do
+                {
+                    itFrameStart = std::search(itFrameStart, m_rxBuffer.end(), m_rxHeaderPattern.begin(), m_rxHeaderPattern.end());
+                    if (itFrameStart == m_rxBuffer.end())
+                        break;
+
+                    if (m_rxFooterPattern.size() != 0)
                     {
-                        itHeader++;
-                        continue;
+                        itFrameEnd = std::search((itFrameStart + m_rxHeaderPattern.size()), m_rxBuffer.end(), m_rxFooterPattern.begin(), m_rxFooterPattern.end());
+                        itFrameEnd += m_rxFooterPattern.size();
+                        if (m_rxFrameSize.has_value() && std::distance(itFrameStart, itFrameEnd) != (*m_rxFrameSize)) // fixed-size mismatch, drop frame
+                        {
+                            itFrameStart = itFrameEnd;
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        itFrameEnd = itFrameStart + (*m_rxFrameSize);
+                    }
+
+                    if (itFrameEnd > m_rxBuffer.end())
+                        break;
+
+                    const std::span<const uint8_t> frame(itFrameStart, itFrameEnd);
+                    if (m_validator(RxMessage(), frame))
+                    {
+                        RxMessage& msg = messages.emplace_back();
+                        msg.Unpack(frame);
+
+                        itFrameStart = itFrameEnd;
+                    }
+                    else
+                    {
+                        itFrameStart++;
+                    }
+
+
+                } while (itFrameStart < m_rxBuffer.end() && messages.size() < n && checkTimeout());
+
+                // remove all data except the last, possible incomplete message
+                if (itFrameStart == m_rxBuffer.end() && !m_rxBuffer.empty())
+                {
+                    // check for partial header
+                    const size_t searchLength = std::min((m_rxHeaderPattern.size() - 1), (m_rxBuffer.size() - 1));
+                    auto itLastHeaderStart = std::find(m_rxBuffer.rbegin(), (m_rxBuffer.rbegin() + searchLength), m_rxHeaderPattern[0]);
+                    const auto phc = std::distance(m_rxBuffer.rbegin(), itLastHeaderStart);
+                    itFrameStart = m_rxBuffer.end() - phc - 1;
+
+                    if (phc > 0 &&
+                        phc < m_rxHeaderPattern.size() &&
+                        std::equal(itFrameStart, m_rxBuffer.end(), m_rxHeaderPattern.begin()))
+                    {
+                        // partial header found
+                        (void)m_rxBuffer.erase(m_rxBuffer.begin(), itFrameStart);
+                    }
+                    else
+                    {
+                        m_rxBuffer.clear();
                     }
                 }
                 else
                 {
-                    itFooter = itHeader + (*m_rxFrameSize);
+                    (void)m_rxBuffer.erase(m_rxBuffer.begin(), itFrameStart);
                 }
 
-                if (itFooter >= m_rxBuffer.end())
-                    break;
+                std::this_thread::sleep_for(pollingPeriod);
 
-                if (m_validator(RxMessage(), std::span<const uint8_t>(itHeader, itFooter)))
-                {
-                    RxMessage& msg = messages.emplace_back();
-                    msg.Unpack(RxMessage::Frame(itHeader, itFooter));
-                }
-
-                itHeader++;
-
-            } while (itHeader != m_rxBuffer.end());
-
-            // move the header to the begining of the rx buffer
-            if (itHeader == m_rxBuffer.end())
-            {
-                // TODO do not remove the header bytes 
-                // if only a part of the header is arrived. 
-                // (e.g., hadder pattern is ``AA BB CC DD``, and only ``AA BB`` part is arrived and ``CC DD`` will arrive in next read)
-                m_rxBuffer.clear();
-            }
-            else if (itHeader != m_rxBuffer.begin())
-            {
-                auto it = std::move(itHeader, m_rxBuffer.end(), m_rxBuffer.begin());
-                (void)m_rxBuffer.erase(it, m_rxBuffer.end());
-            }
+            } while (messages.size() < n && checkTimeout());
 
             return messages;
         }
