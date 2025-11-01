@@ -7,9 +7,10 @@
 #include <span>
 #include <optional>
 #include <numeric>
+#include <algorithm>
 #include <type_traits>
 #include <concepts>
-#include <iostream>
+#include <stdexcept>
 
 namespace ProtoComm
 {
@@ -137,10 +138,10 @@ namespace ProtoComm
     };
 
     /**
-     * @brief A basic frame validator that checks for header and footer patterns.
+     * @brief A basic frame validator that checks for frame size, header and footer patterns.
      *
      * This class provides a concrete implementation of IFrameValidator that
-     * only validates the presence of correct header and footer byte patterns.
+     * only validates the frame size and the presence of correct header and footer byte patterns.
      */
     class FrameValidator : public IFrameValidator
     {
@@ -149,9 +150,12 @@ namespace ProtoComm
 
         virtual bool operator()(const IMessage& msg, const IMessage::Frame& frame) override
         {
-            // frame size checks should be done before calling this method
+            const auto frameSize = msg.FrameSize();
+            if (frameSize.has_value() && frame.size() != (*frameSize))
+                return false;
+
             auto headerPattern = msg.HeaderPattern();
-            if (headerPattern.size() > 0 && !std::equal(headerPattern.begin(), headerPattern.end(), frame.begin()))
+            if (!std::equal(headerPattern.begin(), headerPattern.end(), frame.begin()))
                 return false;
 
             auto footerPattern = msg.FooterPattern();
@@ -165,14 +169,14 @@ namespace ProtoComm
     /**
      * @brief A specialized validator that checks headers, footers, and a checksum.
      *
-     * @tparam TResult The data type of the checksum (e.g., uint8_t, uint16_t).
+     * @tparam TChecksum The data type of the checksum (e.g., uint8_t, uint16_t).
      * @tparam TData The data type of the elements being summed (default: uint8_t).
      * @tparam init The initial value for the checksum calculation (default: 0).
      * @tparam BinaryOp The binary operation for checksum calculation (default: std::plus).
      */
-    template<typename TResult, typename TData = uint8_t, TData init = 0, typename BinaryOp = std::plus<TData>>
-        requires std::is_arithmetic_v<TResult>&& std::is_arithmetic_v<TData>
-    class ChecksumFrameValidator final : public FrameValidator
+    template<typename TChecksum = uint8_t, typename TData = uint8_t, TData init = 0, typename BinaryOp = std::plus<TData>>
+        requires std::is_arithmetic_v<TChecksum>&& std::is_arithmetic_v<TData>
+    class ChecksumValidator final : public FrameValidator
     {
         bool operator()(const IMessage& msg, const IMessage::Frame& frame) override
         {
@@ -180,12 +184,12 @@ namespace ProtoComm
                 return false;
 
             auto payloadBegin = frame.begin() + msg.HeaderPattern().size();
-            auto payloadEnd = frame.end() - msg.FooterPattern().size() - sizeof(TResult);
+            auto payloadEnd = frame.end() - msg.FooterPattern().size() - sizeof(TChecksum);
 
-            TResult expected;
-            std::memcpy(&expected, &(*payloadEnd), sizeof(TResult));
+            TChecksum expected;
+            std::memcpy(&expected, &(*payloadEnd), sizeof(TChecksum));
 
-            const TResult calculated = std::accumulate(payloadBegin, payloadEnd, init, BinaryOp());
+            const TChecksum calculated = std::accumulate(payloadBegin, payloadEnd, init, BinaryOp());
 
             return calculated == expected;
         }
@@ -200,6 +204,7 @@ namespace ProtoComm
     {
         { t.IsConnected() } -> std::same_as<bool>;
         { t.Disconnect() };
+        { t.AvailableReadSize() } -> std::same_as<size_t>;
         { t.Read(buf) }     -> std::same_as<size_t>;
         { t.Write(cbuf) };
     };
@@ -222,33 +227,54 @@ namespace ProtoComm
     {
     private:
         Protocol protocol;
-        Validator frameValidator;
+        Validator validator;
+
+        std::vector<uint8_t> rxBuffer;
+
+        std::optional<size_t> rxFrameSize;
+        std::span<const uint8_t> rxHeaderPattern;
+        std::span<const uint8_t> rxFooterPattern;
+
+        std::optional<size_t> txFrameSize;
+        std::span<const uint8_t> txHeaderPattern;
+        std::span<const uint8_t> txFooterPattern;
 
     public:
-        CommStream& operator>>(RxMessage& msg)
+        CommStream()
         {
-            auto rxMsg = this->Read();
-            if (rxMsg.has_value())
-                msg = std::move(*rxMsg);
-            return *this;
-        }
+            {
+                RxMessage msg;
+                rxFrameSize = msg.FrameSize();
+                rxHeaderPattern = msg.HeaderPattern();
+                rxFooterPattern = msg.FooterPattern();
 
-        CommStream& operator>>(std::vector<RxMessage>& messages)
-        {
-            messages = this->Read();
-            return *this;
-        }
+                if (rxHeaderPattern.size() == 0)
+                {
+                    throw std::runtime_error("all frames must have a header");
+                }
 
-        CommStream& operator<<(const TxMessage& msg)
-        {
-            this->Write(msg);
-            return *this;
-        }
+                if (!rxFrameSize.has_value() && rxFooterPattern.size() == 0)
+                {
+                    throw std::runtime_error("variable-sized frames must have a footer");
+                }
+            }
 
-        CommStream& operator<<(std::span<const TxMessage> messages)
-        {
-            this->Write(messages);
-            return *this;
+            {
+                TxMessage msg;
+                txFrameSize = msg.FrameSize();
+                txHeaderPattern = msg.HeaderPattern();
+                txFooterPattern = msg.FooterPattern();
+
+                if (txHeaderPattern.size() == 0)
+                {
+                    throw std::runtime_error("all frames must have a header");
+                }
+
+                if (!txFrameSize.has_value() && txFooterPattern.size() == 0)
+                {
+                    throw std::runtime_error("variable-sized frames must have a footer");
+                }
+            }
         }
 
         template<typename... Args>
@@ -265,22 +291,59 @@ namespace ProtoComm
                 protocol.Disconnect();
         }
 
-        std::optional<RxMessage> Read()
+        std::vector<RxMessage> Read()
         {
-            auto rxMessages = this->Read(1);
-            return (rxMessages.size() > 0) ? (rxMessages[0]) : (std::nullopt);
-        }
+            std::vector<RxMessage> messages;
 
-        std::vector<RxMessage> Read(size_t n)
-        {
-            if (n == 0)
-                return {};
+            const size_t readSize = protocol.AvailableReadSize();
+            const size_t rxBufferOldSize = rxBuffer.size();
+            rxBuffer.resize(rxBufferOldSize + readSize);
 
-            std::vector<RxMessage> rxMessages;
+            (void)protocol.Read(std::span<uint8_t>(rxBuffer.begin() + rxBufferOldSize, readSize));
 
-            // TODO
+            auto itHeader = rxBuffer.begin();
+            auto itFooter = rxBuffer.begin();
+            do
+            {
+                itHeader = std::search(itHeader, rxBuffer.end(), rxHeaderPattern.begin(), rxHeaderPattern.end());
+                if (itHeader == rxBuffer.end())
+                    break;
 
-            return rxMessages;
+                if (rxFooterPattern.size() != 0)
+                {
+                    itFooter = std::search(itHeader, rxBuffer.end(), rxFooterPattern.begin(), rxFooterPattern.end());
+                    if (rxFrameSize.has_value() && std::distance(itHeader, itFooter) != (*rxFrameSize)) // fixed-size mismatch, drop frame
+                    {
+                        itHeader++;
+                        continue;
+                    }
+                }
+                else
+                {
+                    itFooter = itHeader + (*rxFrameSize);
+                }
+
+                if (itFooter >= rxBuffer.end())
+                    break;
+
+                if (validator(RxMessage(), std::span<const uint8_t>(itHeader, itFooter)))
+                {
+                    RxMessage& msg = messages.emplace_back();
+                    msg.Unpack(RxMessage::Frame(itHeader, itFooter));
+                }
+
+                itHeader++;
+
+            } while (itHeader != rxBuffer.end());
+
+            // move the header to the begining of the rx buffer
+            if (itHeader != rxBuffer.begin())
+            {
+                auto it = std::move(itHeader, rxBuffer.end(), rxBuffer.begin());
+                (void)rxBuffer.erase(it, rxBuffer.end());
+            }
+
+            return messages;
         }
 
         void Write(const TxMessage& msg)
@@ -290,7 +353,7 @@ namespace ProtoComm
 
         void Write(std::span<const TxMessage> messages)
         {
-            // TODO
+
         }
     };
 
