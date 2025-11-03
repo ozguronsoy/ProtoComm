@@ -65,7 +65,7 @@ namespace ProtoComm
 	 * deserialized or "unpacked" from a raw data frame received from the
 	 * transport layer.
 	 */
-	class IRxMessage : public IMessage
+	class IRxMessage : public virtual IMessage
 	{
 	public:
 		virtual ~IRxMessage() = default;
@@ -85,7 +85,7 @@ namespace ProtoComm
 	 * serialized or "packed" into a raw data frame to be sent over the
 	 * transport layer.
 	 */
-	class ITxMessage : public IMessage
+	class ITxMessage : public virtual IMessage
 	{
 	public:
 		virtual ~ITxMessage() = default;
@@ -236,10 +236,10 @@ namespace ProtoComm
 	template<typename T>
 	concept IsCommProtocol = requires(T t, const T ct, size_t ch, std::span<uint8_t> buf, std::span<const uint8_t> cbuf)
 	{
-		{ ct.IsRunning() } -> std::same_as<bool>;
-		{ t.Stop() } -> std::same_as<void>;
 		{ ct.ChannelCount() } -> std::same_as<size_t>;
 		{ ct.AvailableReadSize(ch) } -> std::same_as<size_t>;
+		{ ct.IsRunning() } -> std::same_as<bool>;
+		{ t.Stop() } -> std::same_as<void>;
 		{ t.Read(ch, buf) }     -> std::same_as<size_t>;
 		{ t.Write(ch, cbuf) } -> std::same_as<void>;
 	};
@@ -309,14 +309,10 @@ namespace ProtoComm
 				m_rxFooterPattern = msg.FooterPattern();
 
 				if (m_rxHeaderPattern.empty())
-				{
 					throw std::runtime_error("all frames must have a header");
-				}
 
 				if (!m_rxFrameSize.has_value() && m_rxFooterPattern.empty())
-				{
 					throw std::runtime_error("variable-sized frames must have a footer");
-				}
 			}
 
 			{
@@ -326,16 +322,15 @@ namespace ProtoComm
 				m_txFooterPattern = msg.FooterPattern();
 
 				if (m_txHeaderPattern.empty())
-				{
 					throw std::runtime_error("all frames must have a header");
-				}
 
 				if (!m_txFrameSize.has_value() && m_txFooterPattern.empty())
-				{
 					throw std::runtime_error("variable-sized frames must have a footer");
-				}
 			}
 		}
+
+		CommStream(const CommStream&) = delete;
+		const CommStream& operator=(const CommStream&) = delete;
 
 		/**
 		 * @brief Gets the underlying communication protocol.
@@ -372,14 +367,13 @@ namespace ProtoComm
 		 *
 		 * @tparam Args The types of arguments required by the protocol's `Start` method.
 		 * @param args The arguments required by the protocol's `Start` method.
-		 * @return `true` if the protocol was started successfully, `false` if it failed or if it was already running.
+		 *
+		 * @return `true` if the protocol was started successfully, `false` if it failed.
 		 */
 		template<typename... Args>
 			requires Startable<Protocol, Args...>
 		bool Start(Args... args)
 		{
-			if (this->IsRunning())
-				return false;
 			return m_protocol.Start(std::forward<Args>(args)...);
 		}
 
@@ -389,8 +383,7 @@ namespace ProtoComm
 		 */
 		void Stop()
 		{
-			if (this->IsRunning())
-				m_protocol.Stop();
+			m_protocol.Stop();
 		}
 
 		/**
