@@ -137,7 +137,7 @@ namespace ProtoComm
 		if (!it->port.is_open())
 			return 0;
 
-		(void)asio::read(it->port, asio::buffer(buffer));
+		return asio::read(it->port, asio::buffer(buffer));
 	}
 
 	void AsioSerialProtocol::Write(size_t ch, std::span<const uint8_t> buffer)

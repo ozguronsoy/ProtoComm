@@ -2,6 +2,7 @@
 #define PROTOCOMM_HPP
 
 #include <cstdint>
+#include <cstring>
 #include <array>
 #include <vector>
 #include <span>
