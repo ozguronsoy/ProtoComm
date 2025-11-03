@@ -225,7 +225,7 @@ namespace ProtoComm
 		}
 	};
 
-#pragma endregion Frame Validators
+#pragma endregion Frame Handlers
 
 #pragma region Comm
 
@@ -525,10 +525,13 @@ namespace ProtoComm
 					{
 						RxMessage& msg = messages.emplace_back();
 						msg.Unpack(frame);
-					}
 
-					(void)m_rxBuffer.erase(m_rxBuffer.begin(), itFrameEnd);
-					itFrameStart = m_rxBuffer.begin();
+						itFrameStart = itFrameEnd;
+					}
+					else
+					{
+						itFrameStart += m_rxHeaderPattern.size();
+					}
 
 				} while (itFrameStart < m_rxBuffer.end() && messages.size() < n && checkTimeout());
 
@@ -551,6 +554,10 @@ namespace ProtoComm
 					{
 						m_rxBuffer.clear();
 					}
+				}
+				else if (itFrameStart != m_rxBuffer.begin())
+				{
+					(void)m_rxBuffer.erase(m_rxBuffer.begin(), itFrameStart);
 				}
 
 				std::this_thread::sleep_for(pollingPeriod);
