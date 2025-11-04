@@ -1,0 +1,39 @@
+name: Test
+
+on:
+  push:
+    branches: [ "main" ]
+    
+  pull_request:
+    branches: [ "main" ]
+
+    workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y g++ cmake libasio-dev socat
+
+      - name: Configure CMake
+        run: cmake -S test -B test/build
+
+      - name: Build
+        run: cmake --build test/build
+
+      - name: Run
+        run: |
+          echo "Starting virtual serial port loopback..."
+          sudo socat -d -d pty,raw,echo=0,link=/dev/ttyS10 pty,raw,echo=0,link=/dev/ttyS11 &
+          echo "Waiting for ports to initialize..."
+          sleep 2
+          echo "Running test..."
+          sudo test/build/ProtoCommTest
+
