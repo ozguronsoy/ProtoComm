@@ -13,6 +13,7 @@
 #include <concepts>
 #include <chrono>
 #include <thread>
+#include <functional>
 #include <stdexcept>
 #include <format>
 
@@ -487,7 +488,7 @@ namespace ProtoComm
 			if (ch >= m_protocol.ChannelCount())
 				throw std::out_of_range(std::format("invalid channel index: {}", ch));
 
-			auto& m_rxBuffer = m_rxBuffers[ch];
+			auto& rxBuffer = m_rxBuffers[ch];
 			std::vector<RxMessage> messages;
 			const time_point t1 = clock::now();
 
@@ -510,118 +511,17 @@ namespace ProtoComm
 					continue;
 				}
 
-				const size_t rxBufferOldSize = m_rxBuffer.size();
-				m_rxBuffer.resize(rxBufferOldSize + readSize);
+				const size_t rxBufferOldSize = rxBuffer.size();
+				rxBuffer.resize(rxBufferOldSize + readSize);
 
-				(void)m_protocol.Read(ch, std::span<uint8_t>(m_rxBuffer.begin() + rxBufferOldSize, readSize));
-				if (m_rxFrameSize.has_value() && m_rxBuffer.size() < (*m_rxFrameSize))
+				(void)m_protocol.Read(ch, std::span<uint8_t>(rxBuffer.begin() + rxBufferOldSize, readSize));
+				if (m_rxFrameSize.has_value() && rxBuffer.size() < (*m_rxFrameSize))
 				{
 					std::this_thread::sleep_for(pollingPeriod);
 					continue;
 				}
 
-
-				auto itFrameStart = m_rxBuffer.begin();
-				auto itFrameEnd = m_rxBuffer.begin();
-				do
-				{
-					itFrameStart = std::search(itFrameStart, m_rxBuffer.end(), m_rxHeaderPattern.begin(), m_rxHeaderPattern.end());
-					if (itFrameStart == m_rxBuffer.end())
-						break;
-
-					if (!m_rxFooterPattern.empty())
-					{
-						itFrameEnd = std::search(
-							(itFrameStart + m_rxHeaderPattern.size()),
-							m_rxBuffer.end(),
-							m_rxFooterPattern.begin(),
-							m_rxFooterPattern.end());
-
-						if (itFrameEnd == m_rxBuffer.end())
-						{
-							if (m_rxFrameSize.has_value())
-							{
-								if (std::distance(itFrameStart, itFrameEnd) >= (*m_rxFrameSize))
-								{
-									// fixed-size mismatch, drop frame
-									itFrameStart += m_rxHeaderPattern.size();
-									continue;
-								}
-								break; // wait for more data
-							}
-							else
-							{
-								auto itNextFrameStart = std::search(
-									(itFrameStart + m_rxHeaderPattern.size()),
-									m_rxBuffer.end(),
-									m_rxHeaderPattern.begin(),
-									m_rxHeaderPattern.end());
-
-								if (itNextFrameStart != m_rxBuffer.end())
-								{
-									// no footer found before next header, drop frame
-									itFrameStart = itNextFrameStart;
-									continue;
-								}
-								break; // wait for more data
-							}
-						}
-
-						itFrameEnd += m_rxFooterPattern.size();
-						if (m_rxFrameSize.has_value() && std::distance(itFrameStart, itFrameEnd) != (*m_rxFrameSize))
-						{
-							// fixed-size mismatch, drop frame
-							itFrameStart += m_rxHeaderPattern.size();
-							continue;
-						}
-					}
-					else
-					{
-						if ((*m_rxFrameSize) > std::distance(itFrameStart, m_rxBuffer.end()))
-							break;
-
-						itFrameEnd = itFrameStart + (*m_rxFrameSize);
-					}
-
-					const std::span<const uint8_t> frame(itFrameStart, itFrameEnd);
-					if (m_frameHandler.Validate(RxMessage(), frame))
-					{
-						RxMessage& msg = messages.emplace_back();
-						msg.Unpack(frame);
-
-						itFrameStart = itFrameEnd;
-					}
-					else
-					{
-						itFrameStart += m_rxHeaderPattern.size();
-					}
-
-				} while (itFrameStart < m_rxBuffer.end() && messages.size() < n && checkTimeout());
-
-				// remove all data except the last, possible incomplete message
-				if (itFrameStart == m_rxBuffer.end() && !m_rxBuffer.empty())
-				{
-					// check for partial header
-					const size_t searchLength = std::min(m_rxHeaderPattern.size(), m_rxBuffer.size());
-					auto itLastHeaderStart = std::find(m_rxBuffer.rbegin(), (m_rxBuffer.rbegin() + searchLength), m_rxHeaderPattern[0]);
-					const auto index = std::distance(m_rxBuffer.begin(), itLastHeaderStart.base()) - 1;
-					itFrameStart = m_rxBuffer.begin() + index;
-
-					if (itFrameStart != ((m_rxBuffer.rbegin() + searchLength).base() - 1) &&
-						std::equal(itFrameStart, m_rxBuffer.end(), m_rxHeaderPattern.begin()))
-					{
-						// partial header found
-						(void)m_rxBuffer.erase(m_rxBuffer.begin(), itFrameStart);
-					}
-					else
-					{
-						m_rxBuffer.clear();
-					}
-				}
-				else if (itFrameStart != m_rxBuffer.begin())
-				{
-					(void)m_rxBuffer.erase(m_rxBuffer.begin(), itFrameStart);
-				}
+				ParseRxMessages(rxBuffer, messages, n, checkTimeout);
 
 				std::this_thread::sleep_for(pollingPeriod);
 
@@ -662,6 +562,112 @@ namespace ProtoComm
 				msg.Pack(frame);
 				m_frameHandler.Seal(msg, std::span<uint8_t>(frame.begin(), frame.end()));
 				m_protocol.Write(ch, std::span<const uint8_t>(frame.begin(), frame.end()));
+			}
+		}
+
+	private:
+		void ParseRxMessages(std::vector<uint8_t>& rxBuffer, std::vector<RxMessage>& messages, size_t n, std::function<bool()> checkTimeout)
+		{
+			auto itFrameStart = rxBuffer.begin();
+			auto itFrameEnd = rxBuffer.begin();
+			do
+			{
+				itFrameStart = std::search(itFrameStart, rxBuffer.end(), m_rxHeaderPattern.begin(), m_rxHeaderPattern.end());
+				if (itFrameStart == rxBuffer.end())
+					break;
+
+				if (!m_rxFooterPattern.empty())
+				{
+					itFrameEnd = std::search(
+						(itFrameStart + m_rxHeaderPattern.size()),
+						rxBuffer.end(),
+						m_rxFooterPattern.begin(),
+						m_rxFooterPattern.end());
+
+					if (itFrameEnd == rxBuffer.end())
+					{
+						if (m_rxFrameSize.has_value())
+						{
+							if (std::distance(itFrameStart, itFrameEnd) >= (*m_rxFrameSize))
+							{
+								// fixed-size mismatch, drop frame
+								itFrameStart += m_rxHeaderPattern.size();
+								continue;
+							}
+							break; // wait for more data
+						}
+						else
+						{
+							auto itNextFrameStart = std::search(
+								(itFrameStart + m_rxHeaderPattern.size()),
+								rxBuffer.end(),
+								m_rxHeaderPattern.begin(),
+								m_rxHeaderPattern.end());
+
+							if (itNextFrameStart != rxBuffer.end())
+							{
+								// no footer found before next header, drop frame
+								itFrameStart = itNextFrameStart;
+								continue;
+							}
+							break; // wait for more data
+						}
+					}
+
+					itFrameEnd += m_rxFooterPattern.size();
+					if (m_rxFrameSize.has_value() && std::distance(itFrameStart, itFrameEnd) != (*m_rxFrameSize))
+					{
+						// fixed-size mismatch, drop frame
+						itFrameStart += m_rxHeaderPattern.size();
+						continue;
+					}
+				}
+				else
+				{
+					if ((*m_rxFrameSize) > std::distance(itFrameStart, rxBuffer.end()))
+						break;
+
+					itFrameEnd = itFrameStart + (*m_rxFrameSize);
+				}
+
+				const std::span<const uint8_t> frame(itFrameStart, itFrameEnd);
+				if (m_frameHandler.Validate(RxMessage(), frame))
+				{
+					RxMessage& msg = messages.emplace_back();
+					msg.Unpack(frame);
+
+					itFrameStart = itFrameEnd;
+				}
+				else
+				{
+					itFrameStart += m_rxHeaderPattern.size();
+				}
+
+			} while (itFrameStart < rxBuffer.end() && messages.size() < n && (!checkTimeout || checkTimeout()));
+
+			// remove all data except the last, possible incomplete message
+			if (itFrameStart == rxBuffer.end() && !rxBuffer.empty())
+			{
+				// check for partial header
+				const size_t searchLength = std::min(m_rxHeaderPattern.size(), rxBuffer.size());
+				auto itLastHeaderStart = std::find(rxBuffer.rbegin(), (rxBuffer.rbegin() + searchLength), m_rxHeaderPattern[0]);
+				const auto index = std::distance(rxBuffer.begin(), itLastHeaderStart.base()) - 1;
+				itFrameStart = rxBuffer.begin() + index;
+
+				if (itFrameStart != ((rxBuffer.rbegin() + searchLength).base() - 1) &&
+					std::equal(itFrameStart, rxBuffer.end(), m_rxHeaderPattern.begin()))
+				{
+					// partial header found
+					(void)rxBuffer.erase(rxBuffer.begin(), itFrameStart);
+				}
+				else
+				{
+					rxBuffer.clear();
+				}
+			}
+			else if (itFrameStart != rxBuffer.begin())
+			{
+				(void)rxBuffer.erase(rxBuffer.begin(), itFrameStart);
 			}
 		}
 	};
