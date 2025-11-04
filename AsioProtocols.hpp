@@ -45,6 +45,7 @@ namespace ProtoComm
 		size_t ChannelCount() const;
 		size_t AvailableReadSize(size_t ch) const;
 		bool IsRunning() const;
+		bool IsRunning(size_t ch) const;
 
 		bool Start(
 			const std::string& portName,
@@ -55,6 +56,7 @@ namespace ProtoComm
 			asio::serial_port_base::flow_control flowControl = asio::serial_port_base::flow_control());
 
 		void Stop();
+		void Stop(size_t ch);
 
 		size_t Read(size_t ch, std::span<uint8_t> buffer);
 		void Write(size_t ch, std::span<const uint8_t> buffer);

@@ -239,8 +239,12 @@ namespace ProtoComm
 	{
 		{ ct.ChannelCount() } -> std::same_as<size_t>;
 		{ ct.AvailableReadSize(ch) } -> std::same_as<size_t>;
+
 		{ ct.IsRunning() } -> std::same_as<bool>;
+		{ ct.IsRunning(ch) } -> std::same_as<bool>;
 		{ t.Stop() } -> std::same_as<void>;
+		{ t.Stop(ch) } -> std::same_as<void>;
+
 		{ t.Read(ch, buf) }     -> std::same_as<size_t>;
 		{ t.Write(ch, cbuf) } -> std::same_as<void>;
 	};
@@ -290,7 +294,7 @@ namespace ProtoComm
 		Protocol m_protocol;
 		_FrameHandler m_frameHandler;
 
-		std::vector<uint8_t> m_rxBuffer;
+		std::vector<std::vector<uint8_t>> m_rxBuffers;
 
 		std::optional<size_t> m_rxFrameSize;
 		std::span<const uint8_t> m_rxHeaderPattern;
@@ -304,10 +308,13 @@ namespace ProtoComm
 		CommStream()
 		{
 			{
-				RxMessage msg;
+				RxMessage msg{};
 				m_rxFrameSize = msg.FrameSize();
 				m_rxHeaderPattern = msg.HeaderPattern();
 				m_rxFooterPattern = msg.FooterPattern();
+
+				if (m_rxFrameSize.has_value() && m_rxFrameSize == 0)
+					throw std::runtime_error("fixed-sized frame size cannot be 0");
 
 				if (m_rxHeaderPattern.empty())
 					throw std::runtime_error("all frames must have a header");
@@ -317,10 +324,13 @@ namespace ProtoComm
 			}
 
 			{
-				TxMessage msg;
+				TxMessage msg{};
 				m_txFrameSize = msg.FrameSize();
 				m_txHeaderPattern = msg.HeaderPattern();
 				m_txFooterPattern = msg.FooterPattern();
+
+				if (m_txFrameSize.has_value() && m_txFrameSize == 0)
+					throw std::runtime_error("fixed-sized frame size cannot be 0");
 
 				if (m_txHeaderPattern.empty())
 					throw std::runtime_error("all frames must have a header");
@@ -364,6 +374,16 @@ namespace ProtoComm
 		}
 
 		/**
+		 * @brief Checks if a specific communication channel is running.
+		 *
+		 * @return true if the specified channel is running, false otherwise.
+		 */
+		bool IsRunning(size_t ch) const
+		{
+			return m_protocol.IsRunning(ch);
+		}
+
+		/**
 		 * @brief Starts the underlying communication protocol.
 		 *
 		 * @tparam Args The types of arguments required by the protocol's `Start` method.
@@ -375,16 +395,64 @@ namespace ProtoComm
 			requires Startable<Protocol, Args...>
 		bool Start(Args... args)
 		{
-			return m_protocol.Start(std::forward<Args>(args)...);
+			const bool result = m_protocol.Start(std::forward<Args>(args)...);
+
+			if (result)
+				m_rxBuffers.resize(m_protocol.ChannelCount());
+
+			return result;
 		}
 
 		/**
-		 * @brief Stops the underlying communication protocol.
+		 * @brief Stops the entire underlying communication protocol.
 		 *
 		 */
 		void Stop()
 		{
 			m_protocol.Stop();
+			m_rxBuffers.clear();
+		}
+
+		/**
+		 * @brief Stops a single, specific communication channel.
+		 *
+		 * @param ch The channel index to stop. This must be a value
+		 * in the range `[0, ChannelCount() - 1]`.
+		 */
+		void Stop(size_t ch)
+		{
+			const size_t oldChannelCount = m_protocol.ChannelCount();
+			if (ch >= oldChannelCount)
+				throw std::out_of_range(std::format("invalid channel index: {}", ch));
+
+			m_protocol.Stop(ch);
+			if (oldChannelCount != (m_protocol.ChannelCount() + 1))
+				throw std::logic_error(
+					std::format(
+						"Protocol contract violation: After Stop({}), ChannelCount() was {} but expected {}. Protocol must decrease count by exactly 1.",
+						ch, m_protocol.ChannelCount(), (oldChannelCount - 1)
+					));
+
+			(void)m_rxBuffers.erase(m_rxBuffers.begin() + ch);
+		}
+
+		/**
+		 * @brief Removes all inactive or disconnected channels.
+		 *
+		 * @return The number of channels that were removed.
+		 */
+		size_t Prune()
+		{
+			size_t channelsRemoved = 0;
+			for (size_t ch = m_protocol.ChannelCount(); (ch--) > 0; )
+			{
+				if (!this->IsRunning(ch))
+				{
+					this->Stop(ch);
+					channelsRemoved++;
+				}
+			}
+			return channelsRemoved;
 		}
 
 		/**
@@ -416,11 +484,12 @@ namespace ProtoComm
 
 			constexpr std::chrono::milliseconds pollingPeriod = std::chrono::milliseconds(10);
 
-			std::vector<RxMessage> messages;
-			const time_point t1 = clock::now();
-
 			if (ch >= m_protocol.ChannelCount())
 				throw std::out_of_range(std::format("invalid channel index: {}", ch));
+
+			auto& m_rxBuffer = m_rxBuffers[ch];
+			std::vector<RxMessage> messages;
+			const time_point t1 = clock::now();
 
 			if (n == 0)
 				return messages;

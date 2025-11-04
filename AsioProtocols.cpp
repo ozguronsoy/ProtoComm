@@ -25,8 +25,8 @@ namespace ProtoComm
 
 	const AsioSerialProtocol::Channel& AsioSerialProtocol::GetChannel(size_t ch) const
 	{
-		if (ch >= m_channels.size())
-			throw std::out_of_range("channel index out of range");
+		if (ch >= this->ChannelCount())
+			throw std::out_of_range(std::format("invalid channel index: {}", ch));
 
 		auto it = m_channels.cbegin();
 		std::advance(it, ch);
@@ -53,8 +53,8 @@ namespace ProtoComm
 
 	size_t AsioSerialProtocol::AvailableReadSize(size_t ch) const
 	{
-		if (ch >= m_channels.size())
-			throw std::out_of_range("channel index out of range");
+		if (ch >= this->ChannelCount())
+			throw std::out_of_range(std::format("invalid channel index: {}", ch));
 
 		auto it = m_channels.begin();
 		std::advance(it, ch);
@@ -84,7 +84,18 @@ namespace ProtoComm
 
 	bool AsioSerialProtocol::IsRunning() const
 	{
-		return !m_channels.empty();
+		return std::find_if(m_channels.begin(), m_channels.end(),
+			[](auto& channel) {
+				return channel.port.is_open();
+			}) != m_channels.end();
+	}
+
+	bool AsioSerialProtocol::IsRunning(size_t ch) const
+	{
+		if (ch >= this->ChannelCount())
+			throw std::out_of_range(std::format("invalid channel index: {}", ch));
+
+		return std::next(m_channels.begin(), ch)->port.is_open();
 	}
 
 	bool AsioSerialProtocol::Start(
@@ -102,7 +113,7 @@ namespace ProtoComm
 		try
 		{
 			ch.port.open(portName);
-			
+
 			ch.port.set_option(baudRate);
 			ch.port.set_option(dataBits);
 			ch.port.set_option(stopBits);
@@ -126,10 +137,18 @@ namespace ProtoComm
 		m_channels.clear();
 	}
 
+	void AsioSerialProtocol::Stop(size_t ch)
+	{
+		if (ch >= this->ChannelCount())
+			throw std::out_of_range(std::format("invalid channel index: {}", ch));
+
+		(void)m_channels.erase(std::next(m_channels.begin(), ch));
+	}
+
 	size_t AsioSerialProtocol::Read(size_t ch, std::span<uint8_t> buffer)
 	{
-		if (ch >= m_channels.size())
-			throw std::out_of_range("channel index out of range");
+		if (ch >= this->ChannelCount())
+			throw std::out_of_range(std::format("invalid channel index: {}", ch));
 
 		auto it = m_channels.begin();
 		std::advance(it, ch);
@@ -142,8 +161,8 @@ namespace ProtoComm
 
 	void AsioSerialProtocol::Write(size_t ch, std::span<const uint8_t> buffer)
 	{
-		if (ch >= m_channels.size())
-			throw std::out_of_range("channel index out of range");
+		if (ch >= this->ChannelCount())
+			throw std::out_of_range(std::format("invalid channel index: {}", ch));
 
 		auto it = m_channels.begin();
 		std::advance(it, ch);
