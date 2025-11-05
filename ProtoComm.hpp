@@ -10,6 +10,8 @@
 #include <numeric>
 #include <algorithm>
 #include <type_traits>
+#include <typeinfo>
+#include <typeindex>
 #include <concepts>
 #include <chrono>
 #include <thread>
@@ -19,6 +21,8 @@
 
 namespace ProtoComm
 {
+
+	class IFrameHandler;
 
 #pragma region Messages
 
@@ -58,6 +62,20 @@ namespace ProtoComm
 		 * does not use a footer pattern.
 		 */
 		virtual std::span<const uint8_t> FooterPattern() const = 0;
+
+		/**
+		 * @brief Gets the frame handler responsible for this message type.
+		 *
+		 * @return A reference to the associated frame handler instance.
+		 */
+		virtual IFrameHandler& FrameHandler() const = 0;
+
+		/**
+		 * @brief Creates a deep copy of this message object.
+		 *
+		 * @return A unique pointer pointing to the cloned object.
+		 */
+		virtual std::unique_ptr<IMessage> Clone() const = 0;
 	};
 
 	/**
@@ -179,6 +197,12 @@ namespace ProtoComm
 				(void)std::copy(footerPattern.rbegin(), footerPattern.rend(), frame.rbegin());
 			}
 		}
+
+		static FrameHandler& Instance()
+		{
+			static FrameHandler instance{};
+			return instance;
+		}
 	};
 
 	/**
@@ -225,6 +249,12 @@ namespace ProtoComm
 			auto checksumPosition = frame.end() - msg.FooterPattern().size() - sizeof(TChecksum);
 			(void)std::memcpy(&(*checksumPosition), &checksum, sizeof(TChecksum));
 		}
+
+		static ChecksumFrameHandler& Instance()
+		{
+			static ChecksumFrameHandler instance{};
+			return instance;
+		}
 	};
 
 #pragma endregion Frame Handlers
@@ -269,80 +299,36 @@ namespace ProtoComm
 	 *
 	 * @tparam Protocol The concrete transport protocol type (e.g., `TcpClient`, `SerialPort`).
 	 * This type must satisfy the `IsCommProtocol` concept.
-	 *
-	 * @tparam RxMessage The concrete receivable message type.
-	 * This type must be derived from `ProtoComm::IRxMessage`.
-	 *
-	 * @tparam TxMessage The concrete transmittable message type.
-	 * This type must be derived from `ProtoComm::ITxMessage`.
-	 *
-	 * @tparam _FrameHandler The concrete frame handler type responsible
-	 * for validating incoming (Rx) frames and sealing outgoing (Tx)
-	 * frames. This type must be derived from `ProtoComm::IFrameHandler`.
-	 * (e.g., `ChecksumFrameHandler`). Defaults to `FrameHandler`.
-	 *
 	 */
-	template<typename Protocol, typename RxMessage, typename TxMessage, typename _FrameHandler = FrameHandler>
-		requires
-	IsCommProtocol<Protocol>&&
-		std::derived_from<RxMessage, IRxMessage>&&
-		std::derived_from<TxMessage, ITxMessage>&&
-		std::derived_from<_FrameHandler, IFrameHandler>
-
-		class CommStream final
+	template<typename Protocol>
+		requires IsCommProtocol<Protocol>
+	class CommStream final
 	{
 	private:
-		Protocol m_protocol;
-		_FrameHandler m_frameHandler;
+		struct FrameInfo
+		{
+			std::optional<size_t> size;
+			std::span<const uint8_t> headerPattern;
+			std::span<const uint8_t> footerPattern;
+			std::reference_wrapper<IFrameHandler> handler;
 
+			FrameInfo(std::optional<size_t> fs, std::span<const uint8_t> hp, std::span<const uint8_t> fp, IFrameHandler& fh)
+				: size(fs),
+				headerPattern(hp),
+				footerPattern(fp),
+				handler(fh)
+			{
+			}
+		};
+
+	private:
+		Protocol m_protocol;
 		std::vector<std::vector<uint8_t>> m_rxBuffers;
 
-		std::optional<size_t> m_rxFrameSize;
-		std::span<const uint8_t> m_rxHeaderPattern;
-		std::span<const uint8_t> m_rxFooterPattern;
-
-		std::optional<size_t> m_txFrameSize;
-		std::span<const uint8_t> m_txHeaderPattern;
-		std::span<const uint8_t> m_txFooterPattern;
-
 	public:
-		CommStream()
-		{
-			{
-				RxMessage msg{};
-				m_rxFrameSize = msg.FrameSize();
-				m_rxHeaderPattern = msg.HeaderPattern();
-				m_rxFooterPattern = msg.FooterPattern();
-
-				if (m_rxFrameSize.has_value() && m_rxFrameSize == 0)
-					throw std::runtime_error("fixed-sized frame size cannot be 0");
-
-				if (m_rxHeaderPattern.empty())
-					throw std::runtime_error("all frames must have a header");
-
-				if (!m_rxFrameSize.has_value() && m_rxFooterPattern.empty())
-					throw std::runtime_error("variable-sized frames must have a footer");
-			}
-
-			{
-				TxMessage msg{};
-				m_txFrameSize = msg.FrameSize();
-				m_txHeaderPattern = msg.HeaderPattern();
-				m_txFooterPattern = msg.FooterPattern();
-
-				if (m_txFrameSize.has_value() && m_txFrameSize == 0)
-					throw std::runtime_error("fixed-sized frame size cannot be 0");
-
-				if (m_txHeaderPattern.empty())
-					throw std::runtime_error("all frames must have a header");
-
-				if (!m_txFrameSize.has_value() && m_txFooterPattern.empty())
-					throw std::runtime_error("variable-sized frames must have a footer");
-			}
-		}
-
+		CommStream() = default;
 		CommStream(const CommStream&) = delete;
-		const CommStream& operator=(const CommStream&) = delete;
+		CommStream& operator=(const CommStream&) = delete;
 
 		/**
 		 * @brief Gets the underlying communication protocol.
@@ -464,10 +450,13 @@ namespace ProtoComm
 		 * a specific channel, blocking the calling thread until the
 		 * conditions are met.
 		 *
+		 * @tparam RxMessages A variadic template pack of the concrete `IRxMessage` types to listen for.
+		 *
 		 * @param ch The channel index from which to read messages.
 		 * This must be a value in the range `[0, CommStream::ChannelCount() - 1]`.
 		 *
 		 * @param n The desired number of messages to read.
+		 *
 		 * @param timeout The maximum duration to wait for the messages.
 		 * - If `std::chrono::milliseconds::zero()` (the default), this
 		 * function will block indefinitely until exactly 'n'
@@ -478,7 +467,53 @@ namespace ProtoComm
 		 *
 		 * @return A vector containing the messages that were successfully parsed.
 		 */
-		std::vector<RxMessage> Read(size_t ch, size_t n = 1, std::chrono::milliseconds timeout = std::chrono::milliseconds::zero())
+		template<typename... RxMessages>
+			requires (std::derived_from<RxMessages, IRxMessage>, ...)
+		std::vector<std::unique_ptr<IRxMessage>> Read(
+			size_t ch,
+			size_t n = 1,
+			std::chrono::milliseconds timeout = std::chrono::milliseconds::zero())
+		{
+			const std::array<std::unique_ptr<const IRxMessage>, sizeof...(RxMessages)> instances = { std::make_unique<const RxMessages>()...};
+
+			std::vector<std::reference_wrapper<const IRxMessage>> prototypes;
+			prototypes.reserve(sizeof...(RxMessages));
+
+			for (auto& prototype : instances)
+				prototypes.push_back(*prototype);
+
+			return this->Read(ch, prototypes, n, timeout);
+		}
+
+		/**
+		 * @brief Blocks until 'n' messages are read from a specific channel
+		 * or a timeout occurs.
+		 *
+		 * This function attempts to read a specified number of messages from
+		 * a specific channel, blocking the calling thread until the
+		 * conditions are met.
+		 *
+		 * @param ch The channel index from which to read messages.
+		 * This must be a value in the range `[0, CommStream::ChannelCount() - 1]`.
+		 *
+		 * @param n The desired number of messages to read.
+		 * @param prototypes A span of prototype instances that specifiy the types of messages to attempt to parse from the incoming data.
+		 *
+		 * @param timeout The maximum duration to wait for the messages.
+		 * - If `std::chrono::milliseconds::zero()` (the default), this
+		 * function will block indefinitely until exactly 'n'
+		 * messages have been received.
+		 * - If greater than zero, the function will return after the
+		 * timeout expires, even if fewer than 'n' messages were
+		 * received.
+		 *
+		 * @return A vector containing the messages that were successfully parsed.
+		 */
+		std::vector<std::unique_ptr<IRxMessage>> Read(
+			size_t ch,
+			std::span<const std::reference_wrapper<const IRxMessage>> prototypes,
+			size_t n = 1,
+			std::chrono::milliseconds timeout = std::chrono::milliseconds::zero())
 		{
 			using clock = std::chrono::high_resolution_clock;
 			using time_point = clock::time_point;
@@ -488,8 +523,21 @@ namespace ProtoComm
 			if (ch >= m_protocol.ChannelCount())
 				throw std::out_of_range(std::format("invalid channel index: {}", ch));
 
+			for (auto it = prototypes.begin(); it != prototypes.end(); ++it)
+			{
+				const std::type_index typeIndex(typeid(it->get()));
+				const size_t count = std::count_if(it, prototypes.end(),
+					[&typeIndex](const auto& mt)
+					{
+						return std::type_index(typeid(mt.get())) == typeIndex;
+					});
+
+				if (count > 1)
+					throw std::invalid_argument("duplicate message types found in 'prototypes' list, all prototypes must be unique");
+			}
+
 			auto& rxBuffer = m_rxBuffers[ch];
-			std::vector<RxMessage> messages;
+			std::vector<std::unique_ptr<IRxMessage>> messages;
 			const time_point t1 = clock::now();
 
 			if (n == 0)
@@ -513,15 +561,8 @@ namespace ProtoComm
 
 				const size_t rxBufferOldSize = rxBuffer.size();
 				rxBuffer.resize(rxBufferOldSize + readSize);
-
 				(void)m_protocol.Read(ch, std::span<uint8_t>(rxBuffer.begin() + rxBufferOldSize, readSize));
-				if (m_rxFrameSize.has_value() && rxBuffer.size() < (*m_rxFrameSize))
-				{
-					std::this_thread::sleep_for(pollingPeriod);
-					continue;
-				}
-
-				ParseRxMessages(rxBuffer, messages, n, checkTimeout);
+				ParseRxMessages(prototypes, rxBuffer, messages, n, checkTimeout);
 
 				std::this_thread::sleep_for(pollingPeriod);
 
@@ -531,143 +572,243 @@ namespace ProtoComm
 		}
 
 		/**
-		 * @brief Writes a single message to a specific channel.
+		 * @brief Writes a message to a specific channel.
 		 *
 		 * @param ch The channel index which the message will be sent.
 		 * This must be a value in the range `[0, CommStream::ChannelCount() - 1]`.
 		 *
 		 * @param msg The message to be sent.
 		 */
-		void Write(size_t ch, const TxMessage& msg)
+		void Write(size_t ch, const ITxMessage& msg)
 		{
-			this->Write(ch, std::span<const TxMessage>(&msg, 1));
-		}
+			FrameInfo info = this->GetFrameInfo(msg);
+			IFrameHandler& frameHandler = info.handler.get();
 
-		/**
-		 * @brief Writes a batch of messages to a specific channel.
-		 *
-		 * @param ch The channel index which the message will be sent.
-		 * This must be a value in the range `[0, CommStream::ChannelCount() - 1]`.
-		 *
-		 * @param messages The messages to be sent.
-		 */
-		void Write(size_t ch, std::span<const TxMessage> messages)
-		{
-			std::vector<uint8_t> frame((m_txFrameSize.has_value()) ? (*m_txFrameSize) : (0));
-			for (const TxMessage& msg : messages)
-			{
-				if (!m_txFrameSize.has_value())
-					frame.clear();
+			std::vector<uint8_t> frame((info.size.has_value()) ? (*info.size) : (0));
 
-				msg.Pack(frame);
-				m_frameHandler.Seal(msg, std::span<uint8_t>(frame.begin(), frame.end()));
-				m_protocol.Write(ch, std::span<const uint8_t>(frame.begin(), frame.end()));
-			}
+			msg.Pack(frame);
+			frameHandler.Seal(msg, frame);
+			m_protocol.Write(ch, frame);
 		}
 
 	private:
-		void ParseRxMessages(std::vector<uint8_t>& rxBuffer, std::vector<RxMessage>& messages, size_t n, std::function<bool()> checkTimeout)
+		FrameInfo GetFrameInfo(const IMessage& msg)
 		{
-			auto itFrameStart = rxBuffer.begin();
-			auto itFrameEnd = rxBuffer.begin();
+			auto frameSize = msg.FrameSize();
+			auto headerPattern = msg.HeaderPattern();
+			auto footerPattern = msg.FooterPattern();
+			auto& frameHandler = msg.FrameHandler();
+
+			if (frameSize.has_value() && frameSize == 0)
+				throw std::runtime_error("fixed-sized frame size cannot be 0");
+
+			if (headerPattern.empty())
+				throw std::runtime_error("all frames must have a header");
+
+			if (!frameSize.has_value() && footerPattern.empty())
+				throw std::runtime_error("variable-sized frames must have a footer");
+
+			return FrameInfo(frameSize, headerPattern, footerPattern, frameHandler);
+		}
+
+		void ParseRxMessages(
+			std::span<const std::reference_wrapper<const IRxMessage>> prototypes,
+			std::vector<uint8_t>& rxBuffer,
+			std::vector<std::unique_ptr<IRxMessage>>& messages,
+			size_t n,
+			std::function<bool()> checkTimeout)
+		{
+			if (rxBuffer.empty() || n == 0)
+				return;
+
 			do
 			{
-				itFrameStart = std::search(itFrameStart, rxBuffer.end(), m_rxHeaderPattern.begin(), m_rxHeaderPattern.end());
-				if (itFrameStart == rxBuffer.end())
-					break;
-
-				if (!m_rxFooterPattern.empty())
+				// most outer do-while loop and frame matching are for
+				// unpacking the messages in order of arrival
+				struct FrameMatch
 				{
-					itFrameEnd = std::search(
-						(itFrameStart + m_rxHeaderPattern.size()),
-						rxBuffer.end(),
-						m_rxFooterPattern.begin(),
-						m_rxFooterPattern.end());
-
-					if (itFrameEnd == rxBuffer.end())
+					std::reference_wrapper<const IRxMessage> prototype;
+					size_t startIndex;
+					size_t endIndex;
+					FrameMatch(const IRxMessage& rmi, size_t s, size_t e)
+						: prototype(rmi),
+						startIndex(s),
+						endIndex(e)
 					{
-						if (m_rxFrameSize.has_value())
+					}
+				};
+
+				std::vector<FrameMatch> frameMatches;
+
+				for (size_t i = 0;
+					i < prototypes.size() && messages.size() < n && (!checkTimeout || checkTimeout());
+					++i)
+				{
+					const IRxMessage& prototype = prototypes[i].get();
+					FrameInfo frameInfo = this->GetFrameInfo(prototype);
+					IFrameHandler& frameHandler = frameInfo.handler.get();
+
+					if (frameInfo.size.has_value() && rxBuffer.size() < (*frameInfo.size))
+						continue;
+
+					auto itFrameStart = rxBuffer.begin();
+					auto itFrameEnd = rxBuffer.begin();
+					do
+					{
+						itFrameStart = std::search(itFrameStart, rxBuffer.end(), frameInfo.headerPattern.begin(), frameInfo.headerPattern.end());
+						if (itFrameStart == rxBuffer.end())
+							break;
+
+						if (!frameInfo.footerPattern.empty())
 						{
-							if (std::distance(itFrameStart, itFrameEnd) >= (*m_rxFrameSize))
+							itFrameEnd = std::search(
+								(itFrameStart + frameInfo.headerPattern.size()),
+								rxBuffer.end(),
+								frameInfo.footerPattern.begin(),
+								frameInfo.footerPattern.end());
+
+							if (itFrameEnd == rxBuffer.end())
+							{
+								if (frameInfo.size.has_value())
+								{
+									if (std::distance(itFrameStart, itFrameEnd) >= (*frameInfo.size))
+									{
+										// fixed-size mismatch, drop frame
+										itFrameStart += frameInfo.headerPattern.size();
+										continue;
+									}
+									break; // wait for more data
+								}
+								else
+								{
+									auto itNextFrameStart = std::search(
+										(itFrameStart + frameInfo.headerPattern.size()),
+										rxBuffer.end(),
+										frameInfo.headerPattern.begin(),
+										frameInfo.headerPattern.end());
+
+									if (itNextFrameStart != rxBuffer.end())
+									{
+										// no footer found before next header, drop frame
+										itFrameStart = itNextFrameStart;
+										continue;
+									}
+									break; // wait for more data
+								}
+							}
+
+							itFrameEnd += frameInfo.footerPattern.size();
+							if (frameInfo.size.has_value() && std::distance(itFrameStart, itFrameEnd) != (*frameInfo.size))
 							{
 								// fixed-size mismatch, drop frame
-								itFrameStart += m_rxHeaderPattern.size();
+								itFrameStart += frameInfo.headerPattern.size();
 								continue;
 							}
-							break; // wait for more data
 						}
 						else
 						{
-							auto itNextFrameStart = std::search(
-								(itFrameStart + m_rxHeaderPattern.size()),
-								rxBuffer.end(),
-								m_rxHeaderPattern.begin(),
-								m_rxHeaderPattern.end());
+							if ((*frameInfo.size) > std::distance(itFrameStart, rxBuffer.end()))
+								break;
 
-							if (itNextFrameStart != rxBuffer.end())
-							{
-								// no footer found before next header, drop frame
-								itFrameStart = itNextFrameStart;
-								continue;
-							}
-							break; // wait for more data
+							itFrameEnd = itFrameStart + (*frameInfo.size);
 						}
-					}
 
-					itFrameEnd += m_rxFooterPattern.size();
-					if (m_rxFrameSize.has_value() && std::distance(itFrameStart, itFrameEnd) != (*m_rxFrameSize))
+						const std::span<uint8_t> frame(itFrameStart, itFrameEnd);
+						if (frameHandler.Validate(prototype, frame))
+						{
+							(void)frameMatches.emplace_back(
+								prototype,
+								static_cast<size_t>(std::distance(rxBuffer.begin(), itFrameStart)),
+								static_cast<size_t>(std::distance(rxBuffer.begin(), itFrameEnd)));
+
+							itFrameStart += frame.size();
+						}
+						else
+						{
+							// adjust previously found frame positions
+							for (auto& fm : frameMatches)
+							{
+								if (fm.startIndex > static_cast<size_t>(std::distance(rxBuffer.begin(), itFrameStart)))
+								{
+									fm.startIndex -= frameInfo.headerPattern.size();
+									fm.endIndex -= frameInfo.headerPattern.size();
+								}
+							}
+
+							(void)rxBuffer.erase(itFrameStart, itFrameStart + frameInfo.headerPattern.size());
+
+							itFrameStart = rxBuffer.begin();
+						}
+
+					} while (itFrameStart != rxBuffer.end() && messages.size() < n && (!checkTimeout || checkTimeout()));
+				}
+
+				// unpack frames in order of arrival
+
+				std::sort(frameMatches.begin(),
+					frameMatches.end(),
+					[](const auto& a, const auto& b)
 					{
-						// fixed-size mismatch, drop frame
-						itFrameStart += m_rxHeaderPattern.size();
-						continue;
+						return a.startIndex < b.startIndex;
+					});
+
+				size_t offset = 0;
+				for (auto& fm : frameMatches)
+				{
+					const IRxMessage& prototype = fm.prototype.get();
+					auto itFrameStart = rxBuffer.begin() + (fm.startIndex - offset);
+					auto itFrameEnd = rxBuffer.begin() + (fm.endIndex - offset);
+					const std::span<uint8_t> frame(itFrameStart, itFrameEnd);
+
+					std::unique_ptr<IRxMessage> msg(dynamic_cast<IRxMessage*>(prototype.Clone().release()));
+					msg->Unpack(frame);
+					messages.push_back(std::move(msg));
+					(void)rxBuffer.erase(itFrameStart, itFrameEnd);
+					offset += frame.size();
+				}
+
+			} while (!rxBuffer.empty() && messages.size() < n && (!checkTimeout || checkTimeout()));
+
+			if (!rxBuffer.empty())
+			{
+				auto itEraseEnd = rxBuffer.end();
+
+				// check for full headers
+				for (auto& prototype : prototypes)
+				{
+					FrameInfo frameInfo = this->GetFrameInfo(prototype.get());
+					itEraseEnd = std::min(
+						itEraseEnd,
+						std::search(rxBuffer.begin(), rxBuffer.end(), frameInfo.headerPattern.begin(), frameInfo.headerPattern.end()));
+				}
+
+				// erase all data before the earliest full header
+				if (itEraseEnd != rxBuffer.end())
+				{
+					(void)rxBuffer.erase(rxBuffer.begin(), itEraseEnd);
+					return;
+				}
+
+				// no full headers found, check for partial headers at the end of the buffer
+				for (auto& prototype : prototypes)
+				{
+					FrameInfo frameInfo = this->GetFrameInfo(prototype.get());
+					const size_t searchLength = std::min(frameInfo.headerPattern.size(), rxBuffer.size());
+					auto itLastHeaderStart = std::find(rxBuffer.rbegin(), (rxBuffer.rbegin() + searchLength), frameInfo.headerPattern[0]);
+					const auto index = std::distance(rxBuffer.begin(), itLastHeaderStart.base()) - 1;
+					auto itFrameStart = rxBuffer.begin() + index;
+
+					if (itFrameStart != ((rxBuffer.rbegin() + searchLength).base() - 1) &&
+						std::equal(itFrameStart, rxBuffer.end(), frameInfo.headerPattern.begin()))
+					{
+						// partial header found, erase all data before it
+						(void)rxBuffer.erase(rxBuffer.begin(), itFrameStart);
+						return;
 					}
 				}
-				else
-				{
-					if ((*m_rxFrameSize) > std::distance(itFrameStart, rxBuffer.end()))
-						break;
 
-					itFrameEnd = itFrameStart + (*m_rxFrameSize);
-				}
-
-				const std::span<const uint8_t> frame(itFrameStart, itFrameEnd);
-				if (m_frameHandler.Validate(RxMessage(), frame))
-				{
-					RxMessage& msg = messages.emplace_back();
-					msg.Unpack(frame);
-
-					itFrameStart = itFrameEnd;
-				}
-				else
-				{
-					itFrameStart += m_rxHeaderPattern.size();
-				}
-
-			} while (itFrameStart < rxBuffer.end() && messages.size() < n && (!checkTimeout || checkTimeout()));
-
-			// remove all data except the last, possible incomplete message
-			if (itFrameStart == rxBuffer.end() && !rxBuffer.empty())
-			{
-				// check for partial header
-				const size_t searchLength = std::min(m_rxHeaderPattern.size(), rxBuffer.size());
-				auto itLastHeaderStart = std::find(rxBuffer.rbegin(), (rxBuffer.rbegin() + searchLength), m_rxHeaderPattern[0]);
-				const auto index = std::distance(rxBuffer.begin(), itLastHeaderStart.base()) - 1;
-				itFrameStart = rxBuffer.begin() + index;
-
-				if (itFrameStart != ((rxBuffer.rbegin() + searchLength).base() - 1) &&
-					std::equal(itFrameStart, rxBuffer.end(), m_rxHeaderPattern.begin()))
-				{
-					// partial header found
-					(void)rxBuffer.erase(rxBuffer.begin(), itFrameStart);
-				}
-				else
-				{
-					rxBuffer.clear();
-				}
-			}
-			else if (itFrameStart != rxBuffer.begin())
-			{
-				(void)rxBuffer.erase(rxBuffer.begin(), itFrameStart);
+				// no partial header found, clear entire buffer
+				rxBuffer.clear();
 			}
 		}
 	};
