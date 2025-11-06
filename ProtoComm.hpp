@@ -496,7 +496,7 @@ namespace ProtoComm
 			prototypes.reserve(sizeof...(RxMessages));
 
 			for (auto& prototype : instances)
-				prototypes.push_back(std::move(*prototype));
+				prototypes.push_back(*prototype);
 
 			return this->Read(ch, prototypes, n, timeout);
 		}
