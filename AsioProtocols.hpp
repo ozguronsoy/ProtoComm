@@ -31,8 +31,11 @@ namespace ProtoComm
 		asio::io_context m_ioCtx;
 		mutable std::list<Channel> m_channels; // AvailableReadSize requires native serial port handle
 
+		std::thread m_ioThread;
+		bool m_runIoThread;
+
 	public:
-		AsioSerialProtocol() = default;
+		AsioSerialProtocol();
 
 		AsioSerialProtocol(const AsioSerialProtocol&) = delete;
 		AsioSerialProtocol& operator=(const AsioSerialProtocol&) = delete;
@@ -59,6 +62,8 @@ namespace ProtoComm
 		void Stop(size_t ch);
 
 		size_t Read(size_t ch, std::span<uint8_t> buffer);
+		void ReadAsync(size_t ch, ProtocolReadCallback callback);
+
 		void Write(size_t ch, std::span<const uint8_t> buffer);
 	};
 }

@@ -15,12 +15,29 @@ namespace ProtoComm
 	{
 	}
 
+	AsioSerialProtocol::AsioSerialProtocol()
+		: m_runIoThread(true)
+	{
+		m_ioThread = std::thread(
+			[this]()
+			{
+				while (m_runIoThread)
+				{
+					(void)m_ioCtx.run();
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				}
+			});
+	}
+
 	AsioSerialProtocol::~AsioSerialProtocol()
 	{
 		if (this->IsRunning())
-		{
 			this->Stop();
-		}
+
+		m_runIoThread = false;
+		m_ioCtx.stop();
+		if (m_ioThread.joinable())
+			m_ioThread.join();
 	}
 
 	const AsioSerialProtocol::Channel& AsioSerialProtocol::GetChannel(size_t ch) const
@@ -157,6 +174,28 @@ namespace ProtoComm
 			return 0;
 
 		return asio::read(it->port, asio::buffer(buffer));
+	}
+
+	void AsioSerialProtocol::ReadAsync(size_t ch, ProtocolReadCallback callback)
+	{
+		if (ch >= this->ChannelCount())
+			throw std::out_of_range(std::format("invalid channel index: {}", ch));
+
+		auto it = m_channels.begin();
+		std::advance(it, ch);
+
+		if (!it->port.is_open())
+		{
+			callback(std::make_error_code(std::errc::not_connected), 0, std::span<const uint8_t>{});
+			return;
+		}
+
+		auto readBuffer = std::make_shared<std::vector<uint8_t>>(1024);
+		it->port.async_read_some(asio::buffer(*readBuffer),
+			[ch, callback, readBuffer](const std::error_code& ec, size_t size)
+			{
+				callback(ec, ch, std::span<const uint8_t>(readBuffer->begin(), size));
+			});
 	}
 
 	void AsioSerialProtocol::Write(size_t ch, std::span<const uint8_t> buffer)
