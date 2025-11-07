@@ -10,15 +10,17 @@
 #include <string>
 #include <span>
 #include <cstdint>
+#include <mutex>
 
 
 namespace ProtoComm
 {
-	class AsioSerialProtocol final
+	class AsioSerialProtocol final : public ICommProtocol
 	{
 	public:
 		struct Channel
 		{
+			ICommProtocol::ChannelId id;
 			std::string portName;
 			asio::serial_port port;
 			asio::strand<asio::io_context::executor_type> strand;
@@ -29,6 +31,9 @@ namespace ProtoComm
 		};
 
 	private:
+		mutable std::mutex m_mutex;
+		ICommProtocol::ChannelEventCallback m_channelEventCallback;
+
 		asio::io_context m_ioCtx;
 		mutable std::list<Channel> m_channels; // AvailableReadSize requires native serial port handle, hence mutable
 
@@ -41,15 +46,16 @@ namespace ProtoComm
 		AsioSerialProtocol(const AsioSerialProtocol&) = delete;
 		AsioSerialProtocol& operator=(const AsioSerialProtocol&) = delete;
 
-		const Channel& GetChannel(size_t ch) const;
+		const Channel& GetChannel(ICommProtocol::ChannelId channelId) const;
 		std::optional<std::reference_wrapper<const Channel>> GetChannel(const std::string& portName) const;
 
-		size_t ChannelCount() const;
-		size_t AvailableReadSize(size_t ch) const;
-		bool IsRunning() const;
-		bool IsRunning(size_t ch) const;
+		size_t ChannelCount() const override;
+		size_t AvailableReadSize(ICommProtocol::ChannelId channelId) const override;
+		bool IsRunning() const override;
+		bool IsRunning(ICommProtocol::ChannelId channelId) const override;
+		void SetChannelEventCallback(ICommProtocol::ChannelEventCallback callback) override;
 
-		bool Start(
+		std::optional<ICommProtocol::ChannelId> Start(
 			const std::string& portName,
 			asio::serial_port_base::baud_rate baudRate,
 			asio::serial_port_base::character_size dataBits = asio::serial_port_base::character_size(),
@@ -57,16 +63,17 @@ namespace ProtoComm
 			asio::serial_port_base::parity parity = asio::serial_port_base::parity(),
 			asio::serial_port_base::flow_control flowControl = asio::serial_port_base::flow_control());
 
-		void Stop();
-		void Stop(size_t ch);
+		void Stop() override;
+		void Stop(ICommProtocol::ChannelId channelId) override;
 
-		size_t Read(size_t ch, std::span<uint8_t> buffer);
-		void ReadAsync(size_t ch, ProtocolReadCallback callback);
+		size_t Read(ICommProtocol::ChannelId channelId, std::span<uint8_t> buffer) override;
+		void ReadAsync(ICommProtocol::ChannelId channelId, ICommProtocol::ReadCallback callback) override;
 
-		void Write(size_t ch, std::span<const uint8_t> buffer);
-		void WriteAsync(size_t ch, std::span<const uint8_t> buffer, ProtocolWriteCallback callback);
+		void Write(ICommProtocol::ChannelId channelId, std::span<const uint8_t> buffer) override;
+		void WriteAsync(ICommProtocol::ChannelId channelId, std::span<const uint8_t> buffer, ICommProtocol::WriteCallback callback) override;
 
 	private:
+		Channel& FindChannel(ICommProtocol::ChannelId channelId) const;
 		void RunIoContext();
 	};
 }

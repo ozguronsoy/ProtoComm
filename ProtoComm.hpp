@@ -264,42 +264,113 @@ namespace ProtoComm
 #pragma region Comm
 
 	/**
-	 * @brief Callback function type for asynchronous protocol reads.
+	 * @brief Interface for communication protocols.
 	 */
-	using ProtocolReadCallback = std::function<void(const std::error_code&, size_t, std::span<const uint8_t>)>;
-
-	/**
-	 * @brief Callback function type for asynchronous protocol writes.
-	 */
-	using ProtocolWriteCallback = std::function<void(const std::error_code&, size_t, size_t)>;
-
-	/**
-	 * @brief Specifies the requirements for a communication protocol.
-	 *
-	 */
-	template<typename T>
-	concept IsCommProtocol = requires(
-		T t,
-		const T ct,
-		size_t ch,
-		std::span<uint8_t> buf,
-		std::span<const uint8_t> cbuf,
-		ProtocolReadCallback readCallback,
-		ProtocolWriteCallback writeCallback)
+	class ICommProtocol
 	{
-		{ ct.ChannelCount() } -> std::same_as<size_t>;
-		{ ct.AvailableReadSize(ch) } -> std::same_as<size_t>;
+	public:
+		/**
+		 * @brief Type of the unique channel identifier.
+		 */
+		using ChannelId = size_t;
 
-		{ ct.IsRunning() } -> std::same_as<bool>;
-		{ ct.IsRunning(ch) } -> std::same_as<bool>;
-		{ t.Stop() } -> std::same_as<void>;
-		{ t.Stop(ch) } -> std::same_as<void>;
+		/**
+		 * @brief Callback function type for channel events (new channel added or a channel removed).
+		 */
+		using ChannelEventCallback = std::function<void(ChannelId, bool)>;
 
-		{ t.Read(ch, buf) }     -> std::same_as<size_t>;
-		{ t.ReadAsync(ch, readCallback) } -> std::same_as<void>;
+		/**
+		 * @brief Callback function type for asynchronous reads.
+		 */
+		using ReadCallback = std::function<void(const std::error_code&, ChannelId, std::span<const uint8_t>)>;
 
-		{ t.Write(ch, cbuf) } -> std::same_as<void>;
-		{ t.WriteAsync(ch, cbuf, writeCallback) } -> std::same_as<void>;
+		/**
+		 * @brief Callback function type for asynchronous writes.
+		 */
+		using WriteCallback = std::function<void(const std::error_code&, ChannelId, size_t)>;
+
+		/**
+		 * @brief Gets the number of active channels.
+		 *
+		 * @return The number of active channels.
+		 */
+		virtual size_t ChannelCount() const = 0;
+
+		/**
+		 * @brief Gets the number of bytes available to read from the specified channel.
+
+		 * @param channelId The unique id of the channel.
+		 * @return The number of bytes available to read.
+		 */
+		virtual size_t AvailableReadSize(ChannelId channelId) const = 0;
+
+		/**
+		 * @brief Checks whether the protocol is active.
+		 *
+		 * @return `true` if the protocol is running.
+		 */
+		virtual bool IsRunning() const = 0;
+
+		/**
+		 * @brief Checks whether the specified channel is active.
+
+		 * @param channelId The unique id of the channel.
+		 * @return `true` if the channel is active.
+		 */
+		virtual bool IsRunning(ChannelId channelId) const = 0;
+
+		/**
+		 * @brief Sets the channel event callback.
+		 *
+		 * @param callback The method that will be invoked when a channel event occurs.
+		 */
+		virtual void SetChannelEventCallback(ChannelEventCallback callback) = 0;
+
+		/**
+		 * @brief Stops all channels and the protocol.
+		 */
+		virtual void Stop() = 0;
+
+		/**
+		 * @brief Stops the specified channel.
+
+		 * @param channelId The unique id of the channel.
+		 */
+		virtual void Stop(ChannelId channelId) = 0;
+
+		/**
+		 * @brief Reads from the specified channel.
+		 *
+		 * @param channelId The unique id of the channel.
+		 * @param buffer The buffer that will be filled with the data read from the channel.
+		 * @return The number of bytes read.
+		 */
+		virtual size_t Read(ChannelId channelId, std::span<uint8_t> buffer) = 0;
+
+		/**
+		 * @brief Reads from the specified channel asynchronously.
+		 *
+		 * @param channelId The unique id of the channel.
+		 * @param callback The method which will be invoked when the read operation completes or fails.
+		 */
+		virtual void ReadAsync(ChannelId channelId, ReadCallback callback) = 0;
+
+		/**
+		 * @brief Writes to the specified channel.
+		 *
+		 * @param channelId The unique id of the channel.
+		 * @param buffer The buffer that contains the data to be written.
+		 */
+		virtual void Write(ChannelId channelId, std::span<const uint8_t> buffer) = 0;
+
+		/**
+		 * @brief Writes to the specified channel.
+		 *
+		 * @param channelId The unique id of the channel.
+		 * @param buffer The buffer that contains the data to be written.
+		 * @param callback The method which will be invoked when the write operation completes or fails.
+		 */
+		virtual void WriteAsync(ChannelId channelId, std::span<const uint8_t> buffer, WriteCallback callback) = 0;
 	};
 
 	/**
@@ -309,7 +380,7 @@ namespace ProtoComm
 	template<typename T, typename... Args>
 	concept Startable = requires(T t, Args... args)
 	{
-		{ t.Start(std::forward<Args>(args)...) } -> std::same_as<bool>;
+		{ t.Start(std::forward<Args>(args)...) } -> std::same_as<std::optional<ICommProtocol::ChannelId>>;
 	};
 
 	/**
@@ -320,10 +391,9 @@ namespace ProtoComm
 	 * allowing the user to work directly with their defined message objects.
 	 *
 	 * @tparam Protocol The concrete transport protocol type (e.g., `TcpClient`, `SerialPort`).
-	 * This type must satisfy the `IsCommProtocol` concept.
 	 */
 	template<typename Protocol>
-		requires IsCommProtocol<Protocol>
+		requires std::derived_from<Protocol, ICommProtocol>
 	class CommStream final
 	{
 	private:
@@ -349,17 +419,27 @@ namespace ProtoComm
 			friend class CommStream;
 
 		private:
+			ICommProtocol::ChannelId m_channelId;
 			std::vector<uint8_t> m_rxBuffer;
 
 		public:
-			Channel() = default;
+			Channel(ICommProtocol::ChannelId id)
+				: m_channelId(id)
+			{
+			}
+
 			Channel(const Channel&) = delete;
 			Channel& operator=(const Channel&) = delete;
+
+			ICommProtocol::ChannelId Id() const
+			{
+				return m_channelId;
+			}
 		};
 
 	private:
-		Protocol m_protocol;
 		std::vector<std::shared_ptr<Channel>> m_channels;
+		Protocol m_protocol;
 
 	public:
 		/**
@@ -377,7 +457,11 @@ namespace ProtoComm
 		using RxMessagePrototype = std::shared_ptr<const IRxMessage>;
 
 	public:
-		CommStream() = default;
+		CommStream()
+		{
+			m_protocol.SetChannelEventCallback(std::bind(&CommStream::ChannelEventHandler, this, std::placeholders::_1, std::placeholders::_2));
+		}
+
 		CommStream(const CommStream&) = delete;
 		CommStream& operator=(const CommStream&) = delete;
 
@@ -412,18 +496,15 @@ namespace ProtoComm
 		}
 
 		/**
-		 * @brief Gets the channel at a specific index.
+		 * @brief Gets the channel with a specific id.
 		 *
-		 * @param index The zero-based index of the channel to retrieve.
-		 * This must be a value in the range `[0, ChannelCount() - 1]`.
-		 *
-		 * @return A shared pointer to the requested channel.
+		 * @param channelId The unique id of the channel.
+		 * @return A shared pointer if the requested channel found, otherwise `nullptr`.
 		 */
-		std::shared_ptr<Channel> GetChannel(size_t index)
+		std::shared_ptr<Channel> GetChannel(ICommProtocol::ChannelId channelId)
 		{
-			if (index >= this->ChannelCount())
-				throw std::out_of_range(std::format("invalid index: {}", index));
-			return m_channels[index];
+			auto it = std::find_if(m_channels.begin(), m_channels.end(), [channelId](const auto& ch) { return channelId == ch->m_channelId; });
+			return (it != m_channels.end()) ? (*it) : (std::shared_ptr<Channel>());
 		}
 
 		/**
@@ -443,7 +524,7 @@ namespace ProtoComm
 		 */
 		bool IsRunning(std::shared_ptr<Channel> ch) const
 		{
-			return m_protocol.IsRunning(this->GetChannelIndex(ch));
+			return m_protocol.IsRunning(ch->m_channelId);
 		}
 
 		/**
@@ -458,8 +539,9 @@ namespace ProtoComm
 			requires Startable<Protocol, Args...>
 		std::shared_ptr<Channel> Start(Args... args)
 		{
-			if (m_protocol.Start(std::forward<Args>(args)...))
-				return m_channels.emplace_back(new Channel());
+			std::optional<ICommProtocol::ChannelId> channelId = m_protocol.Start(std::forward<Args>(args)...);
+			if (channelId.has_value())
+				return this->GetChannel(*channelId);
 			return nullptr;
 		}
 
@@ -470,7 +552,6 @@ namespace ProtoComm
 		void Stop()
 		{
 			m_protocol.Stop();
-			m_channels.clear();
 		}
 
 		/**
@@ -480,18 +561,7 @@ namespace ProtoComm
 		 */
 		void Stop(std::shared_ptr<Channel> ch)
 		{
-			const size_t oldChannelCount = this->ChannelCount();
-			const size_t channelIndex = this->GetChannelIndex(ch);
-
-			m_protocol.Stop(channelIndex);
-			if (oldChannelCount != (m_protocol.ChannelCount() + 1))
-				throw std::logic_error(
-					std::format(
-						"Protocol contract violation: After Stop(ch), ChannelCount() was {} but expected {}. Protocol must decrease count by exactly 1.",
-						m_protocol.ChannelCount(), (oldChannelCount - 1)
-					));
-
-			(void)m_channels.erase(m_channels.begin() + channelIndex);
+			m_protocol.Stop(ch->m_channelId);
 		}
 
 		/**
@@ -587,7 +657,7 @@ namespace ProtoComm
 			auto& rxBuffer = ch->m_rxBuffer;
 			std::vector<std::unique_ptr<IRxMessage>> messages;
 			const clock::time_point t1 = clock::now();
-			const size_t channelIndex = this->GetChannelIndex(ch);
+			const ICommProtocol::ChannelId channelId = ch->m_channelId;
 
 			if (n == 0)
 				return messages;
@@ -601,7 +671,7 @@ namespace ProtoComm
 
 			do
 			{
-				const size_t readSize = m_protocol.AvailableReadSize(channelIndex);
+				const size_t readSize = m_protocol.AvailableReadSize(channelId);
 				if (readSize == 0)
 				{
 					std::this_thread::sleep_for(pollingPeriod);
@@ -610,7 +680,7 @@ namespace ProtoComm
 
 				const size_t rxBufferOldSize = rxBuffer.size();
 				rxBuffer.resize(rxBufferOldSize + readSize);
-				(void)m_protocol.Read(channelIndex, std::span<uint8_t>(rxBuffer.begin() + rxBufferOldSize, readSize));
+				(void)m_protocol.Read(channelId, std::span<uint8_t>(rxBuffer.begin() + rxBufferOldSize, readSize));
 				this->ParseRxMessages(prototypes, rxBuffer, messages, n, checkTimeout);
 
 				std::this_thread::sleep_for(pollingPeriod);
@@ -674,9 +744,9 @@ namespace ProtoComm
 			this->ValidatePrototypes(prototypes);
 
 			auto pPrototypes = std::make_shared<std::vector<RxMessagePrototype>>(prototypes.begin(), prototypes.end());
-			auto protocolCallback = std::make_shared<ProtocolReadCallback>();
+			auto protocolCallback = std::make_shared<ICommProtocol::ReadCallback>();
 
-			(*protocolCallback) = [this, ch, callback, pPrototypes, protocolCallback](const std::error_code& ec, size_t channelIndex, std::span<const uint8_t> data)
+			(*protocolCallback) = [this, ch, callback, pPrototypes, protocolCallback](const std::error_code& ec, ICommProtocol::ChannelId channelId, std::span<const uint8_t> data)
 				{
 					std::vector<std::unique_ptr<IRxMessage>> messages;
 
@@ -689,18 +759,16 @@ namespace ProtoComm
 						this->ParseRxMessages(*pPrototypes, rxBuffer, messages, std::numeric_limits<size_t>::max(), nullptr); // read all available messages
 					}
 
+					bool continueReading = true;
+
 					if (ec || !messages.empty())
-					{
-						if (callback(ec, ch, messages))
-							m_protocol.ReadAsync(channelIndex, *protocolCallback);
-					}
-					else
-					{
-						m_protocol.ReadAsync(channelIndex, *protocolCallback);
-					}
+						continueReading = callback(ec, ch, messages);
+
+					if (continueReading)
+						m_protocol.ReadAsync(channelId, *protocolCallback);
 				};
 
-			m_protocol.ReadAsync(this->GetChannelIndex(ch), *protocolCallback);
+			m_protocol.ReadAsync(ch->m_channelId, *protocolCallback);
 		}
 
 		/**
@@ -782,7 +850,7 @@ namespace ProtoComm
 
 				msg.get().Pack(frame);
 				frameHandler.Seal(msg, frame);
-				m_protocol.Write(this->GetChannelIndex(ch), frame);
+				m_protocol.Write(ch->m_channelId, frame);
 			}
 		}
 
@@ -817,8 +885,8 @@ namespace ProtoComm
 					messagePositions[i + 1] = messagePositions[i] + frame.size();
 			}
 
-			m_protocol.WriteAsync(this->GetChannelIndex(ch), buffer,
-				[this, ch, callback, messagePositions](const std::error_code& ec, size_t channelIndex, size_t size)
+			m_protocol.WriteAsync(ch->m_channelId, buffer,
+				[this, ch, callback, messagePositions](const std::error_code& ec, ICommProtocol::ChannelId channelId, size_t size)
 				{
 					auto it = std::find_if(messagePositions.begin(), messagePositions.end(), [size](size_t p) { return p >= size; });
 					const size_t writtenMessageCount = static_cast<size_t>(std::distance(messagePositions.begin(), it));
@@ -849,6 +917,21 @@ namespace ProtoComm
 		}
 
 	private:
+		void ChannelEventHandler(ICommProtocol::ChannelId channelId, bool isAdded)
+		{
+			if (isAdded)
+			{
+				if (this->GetChannel(channelId))
+					throw std::logic_error(std::format("a channel with the id {} already exists", channelId));
+				m_channels.push_back(std::make_shared<Channel>(channelId));
+			}
+			else
+			{
+				const size_t channelIndex = this->GetChannelIndex(this->GetChannel(channelId));
+				(void)m_channels.erase(m_channels.begin() + channelIndex);
+			}
+		}
+
 		bool ChannelExists(std::shared_ptr<Channel> ch) const
 		{
 			return std::find(m_channels.begin(), m_channels.end(), ch) != m_channels.end();
