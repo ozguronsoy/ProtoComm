@@ -269,11 +269,23 @@ namespace ProtoComm
 	using ProtocolReadCallback = std::function<void(const std::error_code&, size_t, std::span<const uint8_t>)>;
 
 	/**
+	 * @brief Callback function type for asynchronous protocol writes.
+	 */
+	using ProtocolWriteCallback = std::function<void(const std::error_code&, size_t, size_t)>;
+
+	/**
 	 * @brief Specifies the requirements for a communication protocol.
 	 *
 	 */
 	template<typename T>
-	concept IsCommProtocol = requires(T t, const T ct, size_t ch, std::span<uint8_t> buf, std::span<const uint8_t> cbuf, ProtocolReadCallback readCallback)
+	concept IsCommProtocol = requires(
+		T t,
+		const T ct,
+		size_t ch,
+		std::span<uint8_t> buf,
+		std::span<const uint8_t> cbuf,
+		ProtocolReadCallback readCallback,
+		ProtocolWriteCallback writeCallback)
 	{
 		{ ct.ChannelCount() } -> std::same_as<size_t>;
 		{ ct.AvailableReadSize(ch) } -> std::same_as<size_t>;
@@ -287,6 +299,7 @@ namespace ProtoComm
 		{ t.ReadAsync(ch, readCallback) } -> std::same_as<void>;
 
 		{ t.Write(ch, cbuf) } -> std::same_as<void>;
+		{ t.WriteAsync(ch, cbuf, writeCallback) } -> std::same_as<void>;
 	};
 
 	/**
@@ -330,16 +343,38 @@ namespace ProtoComm
 			}
 		};
 
+	public:
+		class Channel
+		{
+			friend class CommStream;
+
+		private:
+			std::vector<uint8_t> m_rxBuffer;
+
+		public:
+			Channel() = default;
+			Channel(const Channel&) = delete;
+			Channel& operator=(const Channel&) = delete;
+		};
+
 	private:
 		Protocol m_protocol;
-		std::vector<std::vector<uint8_t>> m_rxBuffers;
+		std::vector<std::shared_ptr<Channel>> m_channels;
 
 	public:
 		/**
 		 * @brief Callback function type for async read operations.
 		 * @return `true` to continue reading, `false` to stop.
 		 */
-		using ReadCallback = std::function<bool(const std::error_code&, size_t, std::span<std::unique_ptr<IRxMessage>>)>;
+		using ReadCallback = std::function<bool(const std::error_code&, std::shared_ptr<Channel>, std::span<std::unique_ptr<IRxMessage>>)>;
+		/**
+		 * @brief Callback function type for async write operations.
+		 */
+		using WriteCallback = std::function<void(const std::error_code&, std::shared_ptr<Channel>, size_t)>;
+		/**
+		 * @brief Type of the rx message prototypes.
+		 */
+		using RxMessagePrototype = std::shared_ptr<const IRxMessage>;
 
 	public:
 		CommStream() = default;
@@ -378,12 +413,12 @@ namespace ProtoComm
 
 		/**
 		 * @brief Checks if a specific communication channel is running.
-		 *
-		 * @return true if the specified channel is running, false otherwise.
+		 * @param ch The channel to check.
+		 * @return `true` if the specified channel is running, `false` otherwise.
 		 */
-		bool IsRunning(size_t ch) const
+		bool IsRunning(std::shared_ptr<Channel> ch) const
 		{
-			return m_protocol.IsRunning(ch);
+			return m_protocol.IsRunning(this->GetChannelIndex(ch));
 		}
 
 		/**
@@ -392,18 +427,15 @@ namespace ProtoComm
 		 * @tparam Args The types of arguments required by the protocol's `Start` method.
 		 * @param args The arguments required by the protocol's `Start` method.
 		 *
-		 * @return `true` if the protocol was started successfully, `false` if it failed.
+		 * @return A shared pointer to the channel if the protocol was started successfully, `nullptr` if it failed.
 		 */
 		template<typename... Args>
 			requires Startable<Protocol, Args...>
-		bool Start(Args... args)
+		std::shared_ptr<Channel> Start(Args... args)
 		{
-			const bool result = m_protocol.Start(std::forward<Args>(args)...);
-
-			if (result)
-				m_rxBuffers.resize(m_protocol.ChannelCount());
-
-			return result;
+			if (m_protocol.Start(std::forward<Args>(args)...))
+				return m_channels.emplace_back(new Channel());
+			return nullptr;
 		}
 
 		/**
@@ -413,30 +445,28 @@ namespace ProtoComm
 		void Stop()
 		{
 			m_protocol.Stop();
-			m_rxBuffers.clear();
+			m_channels.clear();
 		}
 
 		/**
 		 * @brief Stops a single, specific communication channel.
 		 *
-		 * @param ch The channel index to stop. This must be a value
-		 * in the range `[0, ChannelCount() - 1]`.
+		 * @param ch The channel to stop.
 		 */
-		void Stop(size_t ch)
+		void Stop(std::shared_ptr<Channel> ch)
 		{
-			const size_t oldChannelCount = m_protocol.ChannelCount();
-			if (ch >= oldChannelCount)
-				throw std::out_of_range(std::format("invalid channel index: {}", ch));
+			const size_t oldChannelCount = this->ChannelCount();
+			const size_t channelIndex = this->GetChannelIndex(ch);
 
-			m_protocol.Stop(ch);
-			if (oldChannelCount != (m_protocol.ChannelCount() + 1))
+			m_protocol.Stop(channelIndex);
+			if (oldChannelCount != (this->ChannelCount() + 1))
 				throw std::logic_error(
 					std::format(
-						"Protocol contract violation: After Stop({}), ChannelCount() was {} but expected {}. Protocol must decrease count by exactly 1.",
-						ch, m_protocol.ChannelCount(), (oldChannelCount - 1)
+						"Protocol contract violation: After Stop(ch), ChannelCount() was {} but expected {}. Protocol must decrease count by exactly 1.",
+						this->ChannelCount(), (oldChannelCount - 1)
 					));
 
-			(void)m_rxBuffers.erase(m_rxBuffers.begin() + ch);
+			(void)m_channels.erase(m_channels.begin() + channelIndex);
 		}
 
 		/**
@@ -447,11 +477,11 @@ namespace ProtoComm
 		size_t Prune()
 		{
 			size_t channelsRemoved = 0;
-			for (size_t ch = m_protocol.ChannelCount(); (ch--) > 0; )
+			for (size_t ch = this->ChannelCount(); (ch--) > 0;)
 			{
-				if (!this->IsRunning(ch))
+				if (!this->IsRunning(m_channels[ch]))
 				{
-					this->Stop(ch);
+					this->Stop(m_channels[ch]);
 					channelsRemoved++;
 				}
 			}
@@ -468,9 +498,7 @@ namespace ProtoComm
 		 *
 		 * @tparam RxMessages A variadic template pack of the concrete `IRxMessage` types to listen for.
 		 *
-		 * @param ch The channel index from which to read messages.
-		 * This must be a value in the range `[0, CommStream::ChannelCount() - 1]`.
-		 *
+		 * @param ch The channel from which to read messages.
 		 * @param n The desired number of messages to read.
 		 *
 		 * @param timeout The maximum duration to wait for the messages.
@@ -486,18 +514,11 @@ namespace ProtoComm
 		template<typename... RxMessages>
 			requires (std::derived_from<RxMessages, IRxMessage>, ...)
 		std::vector<std::unique_ptr<IRxMessage>> Read(
-			size_t ch,
+			std::shared_ptr<Channel> ch,
 			size_t n = 1,
 			std::chrono::milliseconds timeout = std::chrono::milliseconds::zero())
 		{
-			const std::array<std::unique_ptr<const IRxMessage>, sizeof...(RxMessages)> instances = { std::make_unique<const RxMessages>()... };
-
-			std::vector<std::reference_wrapper<const IRxMessage>> prototypes;
-			prototypes.reserve(sizeof...(RxMessages));
-
-			for (auto& prototype : instances)
-				prototypes.push_back(*prototype);
-
+			const std::array<RxMessagePrototype, sizeof...(RxMessages)> prototypes = { std::make_shared<const RxMessages>()... };
 			return this->Read(ch, prototypes, n, timeout);
 		}
 
@@ -509,9 +530,7 @@ namespace ProtoComm
 		 * a specific channel, blocking the calling thread until the
 		 * conditions are met.
 		 *
-		 * @param ch The channel index from which to read messages.
-		 * This must be a value in the range `[0, CommStream::ChannelCount() - 1]`.
-		 *
+		 * @param ch The channel from which to read messages.
 		 * @param prototypes A span of prototype instances that specifiy the types of messages to attempt to parse from the incoming data.
 		 * @param n The desired number of messages to read.
 		 *
@@ -526,8 +545,8 @@ namespace ProtoComm
 		 * @return A vector containing the messages that were successfully parsed.
 		 */
 		std::vector<std::unique_ptr<IRxMessage>> Read(
-			size_t ch,
-			std::span<const std::reference_wrapper<const IRxMessage>> prototypes,
+			std::shared_ptr<Channel> ch,
+			std::span<const RxMessagePrototype> prototypes,
 			size_t n = 1,
 			std::chrono::milliseconds timeout = std::chrono::milliseconds::zero())
 		{
@@ -535,14 +554,15 @@ namespace ProtoComm
 
 			constexpr std::chrono::milliseconds pollingPeriod = std::chrono::milliseconds(10);
 
-			if (ch >= m_protocol.ChannelCount())
-				throw std::out_of_range(std::format("invalid channel index: {}", ch));
+			if (!this->ChannelExists(ch))
+				throw std::invalid_argument("channel not found");
 
 			this->ValidatePrototypes(prototypes);
 
-			auto& rxBuffer = m_rxBuffers[ch];
+			auto& rxBuffer = ch->m_rxBuffer;
 			std::vector<std::unique_ptr<IRxMessage>> messages;
 			const clock::time_point t1 = clock::now();
+			const size_t channelIndex = this->GetChannelIndex(ch);
 
 			if (n == 0)
 				return messages;
@@ -556,7 +576,7 @@ namespace ProtoComm
 
 			do
 			{
-				const size_t readSize = m_protocol.AvailableReadSize(ch);
+				const size_t readSize = m_protocol.AvailableReadSize(channelIndex);
 				if (readSize == 0)
 				{
 					std::this_thread::sleep_for(pollingPeriod);
@@ -565,7 +585,7 @@ namespace ProtoComm
 
 				const size_t rxBufferOldSize = rxBuffer.size();
 				rxBuffer.resize(rxBufferOldSize + readSize);
-				(void)m_protocol.Read(ch, std::span<uint8_t>(rxBuffer.begin() + rxBufferOldSize, readSize));
+				(void)m_protocol.Read(channelIndex, std::span<uint8_t>(rxBuffer.begin() + rxBufferOldSize, readSize));
 				this->ParseRxMessages(prototypes, rxBuffer, messages, n, checkTimeout);
 
 				std::this_thread::sleep_for(pollingPeriod);
@@ -578,70 +598,97 @@ namespace ProtoComm
 		/**
 		 * @brief Reads messages from a specific channel asynchronously.
 		 *
-		 * @param ch The channel index from which to read messages.
-		 * This must be a value in the range `[0, CommStream::ChannelCount() - 1]`.
+		 * @tparam RxMessages A variadic template pack of the concrete `IRxMessage` types to listen for.
+		 * 
+		 * @param ch The channel from which to read messages.
+		 * @param callback The function that will be called when at least one message is parsed, or when an error occurs.
+		 */
+		template<typename... RxMessages>
+			requires (std::derived_from<RxMessages, IRxMessage>, ...)
+		void ReadAsync(std::shared_ptr<Channel> ch, ReadCallback callback)
+		{
+			const std::array<RxMessagePrototype, sizeof...(RxMessages)> prototypes = { std::make_shared<const RxMessages>()... };
+			this->ReadAsync(ch, prototypes, callback);
+		}
+
+		/**
+		 * @brief Reads at least 'n' messages from a specific channel asynchronously.
 		 *
+		 * @tparam RxMessages A variadic template pack of the concrete `IRxMessage` types to listen for.
+		 *
+		 * @param ch The channel from which to read messages.
+		 * @param n The desired number of messages to read.
+		 * @return A future which will return a vector containing the parsed messages on success.
+		 */
+		template<typename... RxMessages>
+			requires (std::derived_from<RxMessages, IRxMessage>, ...)
+		std::future<std::vector<std::unique_ptr<IRxMessage>>> ReadAsync(std::shared_ptr<Channel> ch, size_t n)
+		{
+			const std::array<RxMessagePrototype, sizeof...(RxMessages)> prototypes = { std::make_shared<const RxMessages>()... };
+			return this->ReadAsync(ch, prototypes, n);
+		}
+
+		/**
+		 * @brief Reads messages from a specific channel asynchronously.
+		 *
+		 * @param ch The channel from which to read messages.
 		 * @param prototypes A span of prototype instances that specifiy the types of messages to attempt to parse from the incoming data.
 		 * @param callback The function that will be called when at least one message is parsed, or when an error occurs.
 		 */
 		void ReadAsync(
-			size_t ch,
-			std::span<const std::reference_wrapper<const IRxMessage>> prototypes,
+			std::shared_ptr<Channel> ch,
+			std::span<const RxMessagePrototype> prototypes,
 			ReadCallback callback)
 		{
-			if (ch >= m_protocol.ChannelCount())
-				throw std::out_of_range(std::format("invalid channel index: {}", ch));
+			if (!this->ChannelExists(ch))
+				throw std::invalid_argument("channel not found");
 
 			if (!callback)
 				throw std::invalid_argument("callback cannot be null");
 
 			this->ValidatePrototypes(prototypes);
 
-			auto rxBuffer = std::make_shared<std::vector<uint8_t>>(m_rxBuffers[ch].begin(), m_rxBuffers[ch].end());
+			auto pPrototypes = std::make_shared<std::vector<RxMessagePrototype>>(prototypes.begin(), prototypes.end());
 			auto protocolCallback = std::make_shared<ProtocolReadCallback>();
 
-			m_rxBuffers[ch].clear();
-
-			(*protocolCallback) = [this, prototypes, callback, rxBuffer, protocolCallback](const std::error_code& ec, size_t ch, std::span<const uint8_t> data)
+			(*protocolCallback) = [this, ch, callback, pPrototypes, protocolCallback](const std::error_code& ec, size_t channelIndex, std::span<const uint8_t> data)
 				{
 					std::vector<std::unique_ptr<IRxMessage>> messages;
 
 					if (!ec && data.size() > 0)
 					{
-						const size_t rxBufferOldSize = rxBuffer->size();
-						rxBuffer->resize(rxBufferOldSize + data.size());
-						(void)std::copy(data.begin(), data.end(), rxBuffer->begin() + rxBufferOldSize);
-						this->ParseRxMessages(prototypes, *rxBuffer, messages, std::numeric_limits<size_t>::max(), nullptr); // read all available messages
+						auto& rxBuffer = ch->m_rxBuffer;
+						const size_t rxBufferOldSize = rxBuffer.size();
+						rxBuffer.resize(rxBufferOldSize + data.size());
+						(void)std::copy(data.begin(), data.end(), rxBuffer.begin() + rxBufferOldSize);
+						this->ParseRxMessages(*pPrototypes, rxBuffer, messages, std::numeric_limits<size_t>::max(), nullptr); // read all available messages
 					}
 
 					if (ec || !messages.empty())
 					{
 						if (callback(ec, ch, messages))
-							m_protocol.ReadAsync(ch, *protocolCallback);
+							m_protocol.ReadAsync(channelIndex, *protocolCallback);
 					}
 					else
 					{
-						m_protocol.ReadAsync(ch, *protocolCallback);
+						m_protocol.ReadAsync(channelIndex, *protocolCallback);
 					}
 				};
 
-			m_protocol.ReadAsync(ch, *protocolCallback);
+			m_protocol.ReadAsync(this->GetChannelIndex(ch), *protocolCallback);
 		}
 
 		/**
 		 * @brief Reads at least 'n' messages from a specific channel asynchronously.
 		 *
-		 * @param ch The channel index from which to read messages.
-		 * This must be a value in the range `[0, CommStream::ChannelCount() - 1]`.
-		 *
+		 * @param ch The channel from which to read messages.
 		 * @param prototypes A span of prototype instances that specifiy the types of messages to attempt to parse from the incoming data.
 		 * @param n The desired number of messages to read.
-		 *
 		 * @return A future which will return a vector containing the parsed messages on success.
 		 */
 		std::future<std::vector<std::unique_ptr<IRxMessage>>> ReadAsync(
-			size_t ch,
-			std::span<const std::reference_wrapper<const IRxMessage>> prototypes,
+			std::shared_ptr<Channel> ch,
+			std::span<const RxMessagePrototype> prototypes,
 			size_t n)
 		{
 			if (n == 0)
@@ -650,7 +697,7 @@ namespace ProtoComm
 			auto messages = std::make_shared<std::vector<std::unique_ptr<IRxMessage>>>();
 			auto promise = std::make_shared<std::promise<std::vector<std::unique_ptr<IRxMessage>>>>();
 			this->ReadAsync(ch, prototypes,
-				[n, messages, promise](const std::error_code& ec, size_t ch, std::span<std::unique_ptr<IRxMessage>> newMessages) -> bool
+				[n, messages, promise](const std::error_code& ec, std::shared_ptr<Channel> ch, std::span<std::unique_ptr<IRxMessage>> newMessages) -> bool
 				{
 					if (ec)
 					{
@@ -677,13 +724,14 @@ namespace ProtoComm
 		/**
 		 * @brief Writes a message to a specific channel.
 		 *
-		 * @param ch The channel index which the message will be sent.
-		 * This must be a value in the range `[0, CommStream::ChannelCount() - 1]`.
-		 *
+		 * @param ch The channel which the message will be sent.
 		 * @param msg The message to be sent.
 		 */
-		void Write(size_t ch, const ITxMessage& msg)
+		void Write(std::shared_ptr<Channel> ch, const ITxMessage& msg)
 		{
+			if (!this->ChannelExists(ch))
+				throw std::invalid_argument("channel not found");
+
 			FrameInfo info = this->GetFrameInfo(msg);
 			IFrameHandler& frameHandler = info.handler.get();
 
@@ -691,11 +739,24 @@ namespace ProtoComm
 
 			msg.Pack(frame);
 			frameHandler.Seal(msg, frame);
-			m_protocol.Write(ch, frame);
+			m_protocol.Write(this->GetChannelIndex(ch), frame);
 		}
 
 	private:
-		void ValidatePrototypes(std::span<const std::reference_wrapper<const IRxMessage>> prototypes) const
+		bool ChannelExists(std::shared_ptr<Channel> ch) const
+		{
+			return std::find(m_channels.begin(), m_channels.end(), ch) != m_channels.end();
+		}
+
+		size_t GetChannelIndex(std::shared_ptr<Channel> ch) const
+		{
+			auto it = std::find(m_channels.begin(), m_channels.end(), ch);
+			if (it == m_channels.end())
+				std::invalid_argument("channel not found");
+			return static_cast<size_t>(std::distance(m_channels.begin(), it));
+		}
+
+		void ValidatePrototypes(std::span<const RxMessagePrototype> prototypes) const
 		{
 			if (prototypes.empty())
 				throw std::invalid_argument("prototypes cannot be empty");
@@ -704,9 +765,9 @@ namespace ProtoComm
 			{
 				const std::type_index typeIndex(typeid(it->get()));
 				const size_t count = std::count_if(it, prototypes.end(),
-					[&typeIndex](const auto& mt)
+					[&typeIndex](const auto& prototype)
 					{
-						return std::type_index(typeid(mt.get())) == typeIndex;
+						return std::type_index(typeid(*prototype)) == typeIndex;
 					});
 
 				if (count > 1)
@@ -734,7 +795,7 @@ namespace ProtoComm
 		}
 
 		void ParseRxMessages(
-			std::span<const std::reference_wrapper<const IRxMessage>> prototypes,
+			std::span<const RxMessagePrototype> prototypes,
 			std::vector<uint8_t>& rxBuffer,
 			std::vector<std::unique_ptr<IRxMessage>>& messages,
 			size_t n,
@@ -766,7 +827,7 @@ namespace ProtoComm
 					i < prototypes.size() && messages.size() < n && (!checkTimeout || checkTimeout());
 					++i)
 				{
-					const IRxMessage& prototype = prototypes[i].get();
+					const IRxMessage& prototype = *prototypes[i];
 					FrameInfo frameInfo = this->GetFrameInfo(prototype);
 					IFrameHandler& frameHandler = frameInfo.handler.get();
 
@@ -903,7 +964,7 @@ namespace ProtoComm
 				// check for full headers
 				for (auto& prototype : prototypes)
 				{
-					FrameInfo frameInfo = this->GetFrameInfo(prototype.get());
+					FrameInfo frameInfo = this->GetFrameInfo(*prototype);
 					itEraseEnd = std::min(
 						itEraseEnd,
 						std::search(rxBuffer.begin(), rxBuffer.end(), frameInfo.headerPattern.begin(), frameInfo.headerPattern.end()));
@@ -919,7 +980,7 @@ namespace ProtoComm
 				// no full headers found, check for partial headers at the end of the buffer
 				for (auto& prototype : prototypes)
 				{
-					FrameInfo frameInfo = this->GetFrameInfo(prototype.get());
+					FrameInfo frameInfo = this->GetFrameInfo(*prototype);
 					const size_t searchLength = std::min(frameInfo.headerPattern.size(), rxBuffer.size());
 					auto itLastHeaderStart = std::find(rxBuffer.rbegin(), (rxBuffer.rbegin() + searchLength), frameInfo.headerPattern[0]);
 					const auto index = std::distance(rxBuffer.begin(), itLastHeaderStart.base()) - 1;

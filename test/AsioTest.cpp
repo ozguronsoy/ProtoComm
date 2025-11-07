@@ -184,20 +184,21 @@ float random_float_0_100()
     return distribution(generator);
 }
 
-TEST(ProtoCommTest, Asio_SerialLoopback)
+TEST(AsioSerial, Loopback)
 {
     using SerialStream = CommStream<AsioSerialProtocol>;
 
     constexpr const size_t msgCount = 10;
-    constexpr const size_t chWrite = 0;
-    constexpr const size_t chRead = 1;
 
     SerialStream serialStream;
     std::vector<TelemetryMessage> txTelemetryMessages(msgCount);
     std::vector<ImuMessage> txImuMessages(msgCount);
 
-    EXPECT_TRUE(serialStream.Start("/dev/ttyS10", asio::serial_port_base::baud_rate(9600)));
-    EXPECT_TRUE(serialStream.Start("/dev/ttyS11", asio::serial_port_base::baud_rate(9600)));
+    auto writeChannel = serialStream.Start("/dev/ttyS10", asio::serial_port_base::baud_rate(9600));
+    auto readChannel = serialStream.Start("/dev/ttyS11", asio::serial_port_base::baud_rate(9600));
+
+    EXPECT_TRUE(writeChannel);
+    EXPECT_TRUE(readChannel);
 
     for (size_t i = 0; i < msgCount; ++i)
     {
@@ -218,11 +219,11 @@ TEST(ProtoCommTest, Asio_SerialLoopback)
 
     for (size_t i = 0; i < msgCount; ++i)
     {
-        serialStream.Write(chWrite, txTelemetryMessages[i]);
-        serialStream.Write(chWrite, txImuMessages[i]);
+        serialStream.Write(writeChannel, txTelemetryMessages[i]);
+        serialStream.Write(writeChannel, txImuMessages[i]);
     }
 
-    auto rxMessages = serialStream.Read<TelemetryMessage, ImuMessage>(chRead, (msgCount * 2), std::chrono::milliseconds(5000));
+    auto rxMessages = serialStream.Read<TelemetryMessage, ImuMessage>(readChannel, (msgCount * 2), std::chrono::milliseconds(5000));
 
     EXPECT_EQ(rxMessages.size(), (msgCount * 2));
 

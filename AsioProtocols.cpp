@@ -181,12 +181,15 @@ namespace ProtoComm
 		if (ch >= this->ChannelCount())
 			throw std::out_of_range(std::format("invalid channel index: {}", ch));
 
+		if (!callback)
+			throw std::invalid_argument("callback cannot be null");
+
 		auto it = m_channels.begin();
 		std::advance(it, ch);
 
 		if (!it->port.is_open())
 		{
-			callback(std::make_error_code(std::errc::not_connected), 0, std::span<const uint8_t>{});
+			callback(std::make_error_code(std::errc::not_connected), ch, std::span<const uint8_t>{});
 			return;
 		}
 
@@ -203,6 +206,9 @@ namespace ProtoComm
 		if (ch >= this->ChannelCount())
 			throw std::out_of_range(std::format("invalid channel index: {}", ch));
 
+		if (buffer.empty())
+			return;
+
 		auto it = m_channels.begin();
 		std::advance(it, ch);
 
@@ -210,5 +216,29 @@ namespace ProtoComm
 			return;
 
 		(void)asio::write(it->port, asio::buffer(buffer));
+	}
+
+	void AsioSerialProtocol::WriteAsync(size_t ch, std::span<const uint8_t> buffer, ProtocolWriteCallback callback)
+	{
+		if (ch >= this->ChannelCount())
+			throw std::out_of_range(std::format("invalid channel index: {}", ch));
+
+		if (!callback)
+			throw std::invalid_argument("callback cannot be null");
+
+		auto it = m_channels.begin();
+		std::advance(it, ch);
+
+		if (!it->port.is_open())
+		{
+			callback(std::make_error_code(std::errc::not_connected), ch, 0);
+			return;
+		}
+
+		it->port.async_write_some(asio::buffer(buffer),
+			[ch, callback](const asio::error_code& ec, size_t size)
+			{
+				callback(ec, ch, size);
+			});
 	}
 }

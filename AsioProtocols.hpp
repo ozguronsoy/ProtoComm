@@ -65,6 +65,7 @@ namespace ProtoComm
 		void ReadAsync(size_t ch, ProtocolReadCallback callback);
 
 		void Write(size_t ch, std::span<const uint8_t> buffer);
+		void WriteAsync(size_t ch, std::span<const uint8_t> buffer, ProtocolWriteCallback callback);
 	};
 }
 
