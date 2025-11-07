@@ -11,33 +11,15 @@ namespace ProtoComm
 {
 	AsioSerialProtocol::Channel::Channel(asio::io_context& ioCtx, const std::string& portName)
 		: portName(portName),
-		port(ioCtx)
+		port(ioCtx),
+		strand(asio::make_strand(ioCtx))
 	{
-	}
-
-	AsioSerialProtocol::AsioSerialProtocol()
-		: m_runIoThread(true)
-	{
-		m_ioThread = std::thread(
-			[this]()
-			{
-				while (m_runIoThread)
-				{
-					(void)m_ioCtx.run();
-					std::this_thread::sleep_for(std::chrono::milliseconds(1));
-				}
-			});
 	}
 
 	AsioSerialProtocol::~AsioSerialProtocol()
 	{
 		if (this->IsRunning())
 			this->Stop();
-
-		m_runIoThread = false;
-		m_ioCtx.stop();
-		if (m_ioThread.joinable())
-			m_ioThread.join();
 	}
 
 	const AsioSerialProtocol::Channel& AsioSerialProtocol::GetChannel(size_t ch) const
@@ -159,6 +141,12 @@ namespace ProtoComm
 		if (ch >= this->ChannelCount())
 			throw std::out_of_range(std::format("invalid channel index: {}", ch));
 
+		auto it = m_channels.begin();
+		std::advance(it, ch);
+
+		if (it->port.is_open())
+			it->port.close();
+
 		(void)m_channels.erase(std::next(m_channels.begin(), ch));
 	}
 
@@ -195,10 +183,13 @@ namespace ProtoComm
 
 		auto readBuffer = std::make_shared<std::vector<uint8_t>>(1024);
 		it->port.async_read_some(asio::buffer(*readBuffer),
-			[ch, callback, readBuffer](const std::error_code& ec, size_t size)
-			{
-				callback(ec, ch, std::span<const uint8_t>(readBuffer->begin(), size));
-			});
+			asio::bind_executor(it->strand,
+				[ch, callback, readBuffer](const std::error_code& ec, size_t size)
+				{
+					callback(ec, ch, std::span<const uint8_t>(readBuffer->begin(), size));
+				}));
+
+		(void)m_ioThreads.emplace_back(&AsioSerialProtocol::RunIoContext, this);
 	}
 
 	void AsioSerialProtocol::Write(size_t ch, std::span<const uint8_t> buffer)
@@ -235,10 +226,18 @@ namespace ProtoComm
 			return;
 		}
 
-		it->port.async_write_some(asio::buffer(buffer),
-			[ch, callback](const asio::error_code& ec, size_t size)
-			{
-				callback(ec, ch, size);
-			});
+		asio::async_write(it->port, asio::buffer(buffer),
+			asio::bind_executor(it->strand,
+				[ch, callback](const asio::error_code& ec, size_t size)
+				{
+					callback(ec, ch, size);
+				}));
+
+		(void)m_ioThreads.emplace_back(&AsioSerialProtocol::RunIoContext, this);
+	}
+
+	void AsioSerialProtocol::RunIoContext()
+	{
+		(void)m_ioCtx.run();
 	}
 }

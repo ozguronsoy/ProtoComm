@@ -21,7 +21,8 @@ namespace ProtoComm
 		{
 			std::string portName;
 			asio::serial_port port;
-			
+			asio::strand<asio::io_context::executor_type> strand;
+
 			Channel(asio::io_context& ioCtx, const std::string& portName);
 			Channel(const Channel&) = delete;
 			Channel& operator=(const Channel&) = delete;
@@ -29,18 +30,16 @@ namespace ProtoComm
 
 	private:
 		asio::io_context m_ioCtx;
-		mutable std::list<Channel> m_channels; // AvailableReadSize requires native serial port handle
+		mutable std::list<Channel> m_channels; // AvailableReadSize requires native serial port handle, hence mutable
 
-		std::thread m_ioThread;
-		bool m_runIoThread;
+		std::vector<std::jthread> m_ioThreads;
 
 	public:
-		AsioSerialProtocol();
+		AsioSerialProtocol() = default;
+		~AsioSerialProtocol();
 
 		AsioSerialProtocol(const AsioSerialProtocol&) = delete;
 		AsioSerialProtocol& operator=(const AsioSerialProtocol&) = delete;
-
-		~AsioSerialProtocol();
 
 		const Channel& GetChannel(size_t ch) const;
 		std::optional<std::reference_wrapper<const Channel>> GetChannel(const std::string& portName) const;
@@ -66,6 +65,9 @@ namespace ProtoComm
 
 		void Write(size_t ch, std::span<const uint8_t> buffer);
 		void WriteAsync(size_t ch, std::span<const uint8_t> buffer, ProtocolWriteCallback callback);
+
+	private:
+		void RunIoContext();
 	};
 }
 

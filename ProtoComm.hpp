@@ -398,7 +398,32 @@ namespace ProtoComm
 		 */
 		size_t ChannelCount() const
 		{
-			return m_protocol.ChannelCount();
+			const size_t protocolChannelCount = m_protocol.ChannelCount();
+			const size_t streamChannelCount = m_channels.size();
+
+			if (protocolChannelCount != streamChannelCount)
+				throw std::logic_error(std::format(
+					"Internal state synchronization error: Protocol channel count ({}) "
+					"does not match CommStream's internal channel count ({}).",
+					protocolChannelCount, streamChannelCount
+				));
+
+			return protocolChannelCount;
+		}
+
+		/**
+		 * @brief Gets the channel at a specific index.
+		 *
+		 * @param index The zero-based index of the channel to retrieve.
+		 * This must be a value in the range `[0, ChannelCount() - 1]`.
+		 *
+		 * @return A shared pointer to the requested channel.
+		 */
+		std::shared_ptr<Channel> GetChannel(size_t index)
+		{
+			if (index >= this->ChannelCount())
+				throw std::out_of_range(std::format("invalid index: {}", index));
+			return m_channels[index];
 		}
 
 		/**
@@ -459,11 +484,11 @@ namespace ProtoComm
 			const size_t channelIndex = this->GetChannelIndex(ch);
 
 			m_protocol.Stop(channelIndex);
-			if (oldChannelCount != (this->ChannelCount() + 1))
+			if (oldChannelCount != (m_protocol.ChannelCount() + 1))
 				throw std::logic_error(
 					std::format(
 						"Protocol contract violation: After Stop(ch), ChannelCount() was {} but expected {}. Protocol must decrease count by exactly 1.",
-						this->ChannelCount(), (oldChannelCount - 1)
+						m_protocol.ChannelCount(), (oldChannelCount - 1)
 					));
 
 			(void)m_channels.erase(m_channels.begin() + channelIndex);
@@ -599,7 +624,7 @@ namespace ProtoComm
 		 * @brief Reads messages from a specific channel asynchronously.
 		 *
 		 * @tparam RxMessages A variadic template pack of the concrete `IRxMessage` types to listen for.
-		 * 
+		 *
 		 * @param ch The channel from which to read messages.
 		 * @param callback The function that will be called when at least one message is parsed, or when an error occurs.
 		 */
@@ -618,7 +643,7 @@ namespace ProtoComm
 		 *
 		 * @param ch The channel from which to read messages.
 		 * @param n The desired number of messages to read.
-		 * @return A future which will return a vector containing the parsed messages on success.
+		 * @return A future which will eventually contain the vector of messages that were successfully parsed.
 		 */
 		template<typename... RxMessages>
 			requires (std::derived_from<RxMessages, IRxMessage>, ...)
@@ -684,7 +709,7 @@ namespace ProtoComm
 		 * @param ch The channel from which to read messages.
 		 * @param prototypes A span of prototype instances that specifiy the types of messages to attempt to parse from the incoming data.
 		 * @param n The desired number of messages to read.
-		 * @return A future which will return a vector containing the parsed messages on success.
+		 * @return A future which will eventually contain the vector of messages that were successfully parsed.
 		 */
 		std::future<std::vector<std::unique_ptr<IRxMessage>>> ReadAsync(
 			std::shared_ptr<Channel> ch,
@@ -722,24 +747,105 @@ namespace ProtoComm
 		}
 
 		/**
-		 * @brief Writes a message to a specific channel.
+		 * @brief Writes a single message to a specific channel.
 		 *
 		 * @param ch The channel which the message will be sent.
 		 * @param msg The message to be sent.
 		 */
 		void Write(std::shared_ptr<Channel> ch, const ITxMessage& msg)
 		{
+			const std::array<std::reference_wrapper<const ITxMessage>, 1> messages = { msg };
+			this->Write(ch, messages);
+		}
+
+		/**
+		 * @brief Writes a batch of messages to a specific channel.
+		 *
+		 * @param ch The channel which the message will be sent.
+		 * @param messages A span of messages to send.
+		 */
+		void Write(std::shared_ptr<Channel> ch, std::span<const std::reference_wrapper<const ITxMessage>> messages)
+		{
 			if (!this->ChannelExists(ch))
 				throw std::invalid_argument("channel not found");
 
-			FrameInfo info = this->GetFrameInfo(msg);
-			IFrameHandler& frameHandler = info.handler.get();
+			std::vector<uint8_t> frame;
+			for (auto& msg : messages)
+			{
+				FrameInfo info = this->GetFrameInfo(msg);
+				IFrameHandler& frameHandler = info.handler.get();
 
-			std::vector<uint8_t> frame((info.size.has_value()) ? (*info.size) : (0));
+				if (info.size.has_value())
+					frame.resize(*info.size);
+				else
+					frame.clear();
 
-			msg.Pack(frame);
-			frameHandler.Seal(msg, frame);
-			m_protocol.Write(this->GetChannelIndex(ch), frame);
+				msg.get().Pack(frame);
+				frameHandler.Seal(msg, frame);
+				m_protocol.Write(this->GetChannelIndex(ch), frame);
+			}
+		}
+
+		/**
+		 * @brief Asynchronously writes a batch of messages to a specific channel.
+		 *
+		 * @param ch The channel to write to.
+		 * @param messages A span of messages to send.
+		 * @param callback The function that will be called when at least one message is written, or when an error occurs.
+		 */
+		void WriteAsync(std::shared_ptr<Channel> ch, std::span<const std::reference_wrapper<const ITxMessage>> messages, WriteCallback callback)
+		{
+			if (!this->ChannelExists(ch))
+				throw std::invalid_argument("channel not found");
+
+			if (!callback)
+				throw std::invalid_argument("callback cannot be null");
+
+			std::vector<uint8_t> buffer;
+			std::vector<uint8_t> messagePositions(messages.size());
+			for (size_t i = 0; i < messages.size(); ++i)
+			{
+				const ITxMessage& msg = messages[i];
+				FrameInfo info = this->GetFrameInfo(msg);
+				IFrameHandler& frameHandler = info.handler.get();
+				std::vector<uint8_t> frame((info.size.has_value()) ? (*info.size) : (0));
+
+				msg.Pack(frame);
+				frameHandler.Seal(msg, frame);
+				buffer.insert(buffer.end(), frame.begin(), frame.end());
+				if ((i + 1) < messages.size())
+					messagePositions[i + 1] = messagePositions[i] + frame.size();
+			}
+
+			m_protocol.WriteAsync(this->GetChannelIndex(ch), buffer,
+				[this, ch, callback, messagePositions](const std::error_code& ec, size_t channelIndex, size_t size)
+				{
+					auto it = std::find_if(messagePositions.begin(), messagePositions.end(), [size](size_t p) { return p >= size; });
+					const size_t writtenMessageCount = static_cast<size_t>(std::distance(messagePositions.begin(), it));
+					callback(ec, ch, writtenMessageCount);
+
+				});
+		}
+
+		/**
+		 * @brief Asynchronously writes a batch of messages to a specific channel.
+		 *
+		 * @param ch The channel to write to.
+		 * @param messages A span of messages to send.
+		 * @return A future which will eventually contain the number of messages that were successfully written.
+		 */
+		std::future<size_t> WriteAsync(std::shared_ptr<Channel> ch, std::span<const std::reference_wrapper<const ITxMessage>> messages)
+		{
+			auto promise = std::make_shared<std::promise<size_t>>();
+			this->WriteAsync(ch, messages,
+				[this, promise](const std::error_code& ec, std::shared_ptr<Channel> ch, size_t size)
+				{
+					if (ec)
+						promise->set_exception(std::make_exception_ptr(std::runtime_error(std::format("WriteAsync error: {}", ec.message()))));
+					else
+						promise->set_value(size);
+				});
+			return promise->get_future();
 		}
 
 	private:
