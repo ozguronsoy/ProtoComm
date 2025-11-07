@@ -242,3 +242,72 @@ TEST(AsioSerial, Loopback)
             EXPECT_EQ(*pImuMessage, txImuMessages[k++]);
     }
 }
+
+TEST(AsioSerial, LoopbackAsync)
+{
+    using SerialStream = CommStream<AsioSerialProtocol>;
+
+    constexpr const size_t msgCount = 10;
+
+    SerialStream serialStream;
+    std::vector<TelemetryMessage> txTelemetryMessages(msgCount);
+    std::vector<ImuMessage> txImuMessages(msgCount);
+
+    auto writeChannel = serialStream.Start("/dev/ttyS10", asio::serial_port_base::baud_rate(9600));
+    auto readChannel = serialStream.Start("/dev/ttyS11", asio::serial_port_base::baud_rate(9600));
+
+    EXPECT_TRUE(writeChannel);
+    EXPECT_TRUE(readChannel);
+
+    for (size_t i = 0; i < msgCount; ++i)
+    {
+        txTelemetryMessages[i].altitude = random_float_0_100();
+        txTelemetryMessages[i].latitude = random_float_0_100();
+        txTelemetryMessages[i].longitude = random_float_0_100();
+        txTelemetryMessages[i].temperature = random_float_0_100();
+        txTelemetryMessages[i].pressure = random_float_0_100();
+        txTelemetryMessages[i].state = i;
+
+        txImuMessages[i].ax = random_float_0_100();
+        txImuMessages[i].ay = random_float_0_100();
+        txImuMessages[i].az = random_float_0_100();
+        txImuMessages[i].gx = random_float_0_100();
+        txImuMessages[i].gy = random_float_0_100();
+        txImuMessages[i].gz = random_float_0_100();
+    }
+
+    auto fr = serialStream.ReadAsync<TelemetryMessage, ImuMessage>(readChannel, msgCount * 2);
+
+    std::vector<std::reference_wrapper<const ITxMessage>> txMessages;
+    txMessages.reserve(msgCount * 2);
+    for (size_t i = 0; i < msgCount; ++i)
+    {
+        txMessages.push_back(txTelemetryMessages[i]);
+        txMessages.push_back(txImuMessages[i]);
+    }
+
+    auto fw = serialStream.WriteAsync(writeChannel, txMessages);
+    fw.wait_for(std::chrono::milliseconds(5000));
+    const size_t txCount = fw.get();
+    EXPECT_EQ(txCount, (msgCount * 2));
+
+    fr.wait_for(std::chrono::milliseconds(5000));
+    auto rxMessages = fr.get();
+
+    EXPECT_EQ(rxMessages.size(), (msgCount * 2));
+
+    for (size_t i = 0, j = 0, k = 0;
+        i < (msgCount * 2);
+        ++i)
+    {
+        auto pTelemetryMessage = dynamic_cast<TelemetryMessage*>(rxMessages[i].get());
+        auto pImuMessage = dynamic_cast<ImuMessage*>(rxMessages[i].get());
+
+        EXPECT_TRUE(pTelemetryMessage || pImuMessage);
+
+        if (pTelemetryMessage)
+            EXPECT_EQ(*pTelemetryMessage, txTelemetryMessages[j++]);
+        else if (pImuMessage)
+            EXPECT_EQ(*pImuMessage, txImuMessages[k++]);
+    }
+}
