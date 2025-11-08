@@ -9,6 +9,9 @@
 
 namespace ProtoComm
 {
+
+#pragma region Serial
+
 	AsioSerialProtocol::Channel::Channel(asio::io_context& ioCtx, const std::string& portName)
 		: portName(portName),
 		port(ioCtx),
@@ -121,7 +124,7 @@ namespace ProtoComm
 			ch.port.set_option(parity);
 			ch.port.set_option(flowControl);
 
-			m_channelEventCallback(ch.id, true);
+			m_channelEventCallback(ch.id, ICommProtocol::ChannelEventType::ChannelAdded);
 
 			return ch.id;
 		}
@@ -150,7 +153,7 @@ namespace ProtoComm
 							auto it = std::find_if(m_channels.begin(), m_channels.end(), [pChannel](const Channel& ch) { return &ch == pChannel; });
 							if (it != m_channels.end())
 							{
-								m_channelEventCallback(pChannel->id, false);
+								m_channelEventCallback(pChannel->id, ICommProtocol::ChannelEventType::ChannelRemoved);
 								pChannel->port.close();
 								(void)m_channels.erase(it);
 							}
@@ -178,7 +181,7 @@ namespace ProtoComm
 						auto it = std::find_if(m_channels.begin(), m_channels.end(), [pChannel](const Channel& ch) { return &ch == pChannel; });
 						if (it != m_channels.end())
 						{
-							m_channelEventCallback(pChannel->id, false);
+							m_channelEventCallback(pChannel->id, ICommProtocol::ChannelEventType::ChannelRemoved);
 							pChannel->port.close();
 							(void)m_channels.erase(it);
 						}
@@ -272,4 +275,152 @@ namespace ProtoComm
 	{
 		(void)m_ioCtx.run();
 	}
+
+#pragma endregion Serial
+
+#pragma region TCP Client
+
+	AsioTcpClient::AsioTcpClient()
+		: m_socket(m_ioCtx),
+		m_strand(asio::make_strand(m_ioCtx))
+	{
+	}
+
+	AsioTcpClient::~AsioTcpClient()
+	{
+		if (this->IsRunning())
+			this->Stop();
+	}
+
+	const asio::ip::tcp::socket& AsioTcpClient::Socket() const
+	{
+		return m_socket;
+	}
+
+	size_t AsioTcpClient::ChannelCount() const
+	{
+		return (this->IsRunning()) ? (1) : (0);
+	}
+
+	size_t AsioTcpClient::AvailableReadSize(ICommProtocol::ChannelId channelId) const
+	{
+		return (this->IsRunning()) ? (m_socket.available()) : (0);
+	}
+
+	bool AsioTcpClient::IsRunning() const
+	{
+		return m_socket.is_open();
+	}
+
+	bool AsioTcpClient::IsRunning(ICommProtocol::ChannelId channelId) const
+	{
+		return this->IsRunning();
+	}
+
+	void AsioTcpClient::SetChannelEventCallback(ICommProtocol::ChannelEventCallback callback)
+	{
+		if (!callback)
+			throw std::invalid_argument("channel event callback cannot be null");
+		m_channelEventCallback = callback;
+	}
+
+	std::optional<ICommProtocol::ChannelId> AsioTcpClient::Start(const std::string& host, const std::string& port)
+	{
+		if (this->IsRunning())
+			return std::nullopt;
+
+		try
+		{
+			asio::ip::tcp::resolver resolver(m_ioCtx);
+			auto endpoints = resolver.resolve(host, port);
+			(void)asio::connect(m_socket, endpoints);
+			m_channelEventCallback(k_channelId, ICommProtocol::ChannelEventType::ChannelAdded);
+			return k_channelId;
+		}
+		catch (const std::exception& e)
+		{
+			return std::nullopt;
+		}
+	}
+
+	void AsioTcpClient::Stop()
+	{
+		if (this->IsRunning())
+			asio::post(m_ioCtx,
+				asio::bind_executor(m_strand,
+					[this]()
+					{
+						m_channelEventCallback(k_channelId, ICommProtocol::ChannelEventType::ChannelRemoved);
+						m_socket.close();
+					}));
+	}
+
+	void AsioTcpClient::Stop(ICommProtocol::ChannelId channelId)
+	{
+		this->Stop();
+	}
+
+	size_t AsioTcpClient::Read(ICommProtocol::ChannelId channelId, std::span<uint8_t> buffer)
+	{
+		if (!this->IsRunning())
+			return 0;
+		return asio::read(m_socket, asio::buffer(buffer));
+	}
+
+	void AsioTcpClient::ReadAsync(ICommProtocol::ChannelId channelId, ICommProtocol::ReadCallback callback)
+	{
+		if (!callback)
+			throw std::invalid_argument("callback cannot be null");
+
+		if (!this->IsRunning())
+		{
+			callback(std::make_error_code(std::errc::not_connected), k_channelId, std::span<const uint8_t>{});
+			return;
+		}
+
+		auto readBuffer = std::make_shared<std::vector<uint8_t>>(1024);
+		m_socket.async_read_some(asio::buffer(*readBuffer),
+			asio::bind_executor(m_strand,
+				[channelId, callback, readBuffer](const std::error_code& ec, size_t size)
+				{
+					callback(ec, channelId, std::span<const uint8_t>(readBuffer->begin(), size));
+				}));
+
+		(void)m_ioThreads.emplace_back(&AsioTcpClient::RunIoContext, this);
+	}
+
+	void AsioTcpClient::Write(ICommProtocol::ChannelId channelId, std::span<const uint8_t> buffer)
+	{
+		if (!this->IsRunning())
+			return;
+		(void)asio::write(m_socket, asio::buffer(buffer));
+	}
+
+	void AsioTcpClient::WriteAsync(ICommProtocol::ChannelId channelId, std::span<const uint8_t> buffer, ICommProtocol::WriteCallback callback)
+	{
+		if (!callback)
+			throw std::invalid_argument("callback cannot be null");
+
+		if (!this->IsRunning())
+		{
+			callback(std::make_error_code(std::errc::not_connected), k_channelId, 0);
+			return;
+		}
+
+		asio::async_write(m_socket, asio::buffer(buffer),
+			asio::bind_executor(m_strand,
+				[channelId, callback](const asio::error_code& ec, size_t size)
+				{
+					callback(ec, channelId, size);
+				}));
+
+		(void)m_ioThreads.emplace_back(&AsioTcpClient::RunIoContext, this);
+	}
+
+	void AsioTcpClient::RunIoContext()
+	{
+		m_ioCtx.run();
+	}
+
+#pragma endregion TCP Client
 }

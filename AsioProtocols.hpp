@@ -15,6 +15,9 @@
 
 namespace ProtoComm
 {
+	/**
+	 * @brief Implements multi-channel serial protocol using asio where each channel is a different port.
+	 */
 	class AsioSerialProtocol final : public ICommProtocol
 	{
 	public:
@@ -74,6 +77,50 @@ namespace ProtoComm
 
 	private:
 		Channel& FindChannel(ICommProtocol::ChannelId channelId) const;
+		void RunIoContext();
+	};
+
+	/**
+	 * @brief Implements a single TCP client using asio.
+	 */
+	class AsioTcpClient final : public ICommProtocol
+	{
+	private:
+		static constexpr ICommProtocol::ChannelId k_channelId = 0;
+
+		ICommProtocol::ChannelEventCallback m_channelEventCallback;
+		asio::io_context m_ioCtx;
+		asio::ip::tcp::socket m_socket;
+		asio::strand<asio::io_context::executor_type> m_strand;
+		std::vector<std::jthread> m_ioThreads;
+
+	public:
+		AsioTcpClient();
+		~AsioTcpClient();
+
+		AsioTcpClient(const AsioTcpClient&) = delete;
+		AsioTcpClient& operator=(const AsioTcpClient&) = delete;
+
+		const asio::ip::tcp::socket& Socket() const;
+
+		size_t ChannelCount() const override;
+		size_t AvailableReadSize(ICommProtocol::ChannelId channelId) const override;
+		bool IsRunning() const override;
+		bool IsRunning(ICommProtocol::ChannelId channelId) const override;
+		void SetChannelEventCallback(ICommProtocol::ChannelEventCallback callback) override;
+
+		std::optional<ICommProtocol::ChannelId> Start(const std::string& host, const std::string& port);
+
+		void Stop() override;
+		void Stop(ICommProtocol::ChannelId channelId) override;
+		
+		size_t Read(ICommProtocol::ChannelId channelId, std::span<uint8_t> buffer) override;
+		void ReadAsync(ICommProtocol::ChannelId channelId, ICommProtocol::ReadCallback callback) override;
+		
+		void Write(ICommProtocol::ChannelId channelId, std::span<const uint8_t> buffer) override;
+		void WriteAsync(ICommProtocol::ChannelId channelId, std::span<const uint8_t> buffer, ICommProtocol::WriteCallback callback) override;
+
+	private:
 		void RunIoContext();
 	};
 }

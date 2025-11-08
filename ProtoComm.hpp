@@ -270,6 +270,17 @@ namespace ProtoComm
 	{
 	public:
 		/**
+		 * @brief Specifies the type of event that occurred on a protocol channel.
+		 */
+		enum class ChannelEventType
+		{
+			/** @biref Indicates that a new channel has been added to the protocol. */
+			ChannelAdded,
+			/** @brief Indicates that an existing channel has been removed. */
+			ChannelRemoved
+		};
+
+		/**
 		 * @brief Type of the unique channel identifier.
 		 */
 		using ChannelId = size_t;
@@ -277,7 +288,7 @@ namespace ProtoComm
 		/**
 		 * @brief Callback function type for channel events (new channel added or a channel removed).
 		 */
-		using ChannelEventCallback = std::function<void(ChannelId, bool)>;
+		using ChannelEventCallback = std::function<void(ChannelId, ChannelEventType)>;
 
 		/**
 		 * @brief Callback function type for asynchronous reads.
@@ -915,18 +926,25 @@ namespace ProtoComm
 		}
 
 	private:
-		void ChannelEventHandler(ICommProtocol::ChannelId channelId, bool isAdded)
+		void ChannelEventHandler(ICommProtocol::ChannelId channelId, ICommProtocol::ChannelEventType eventType)
 		{
-			if (isAdded)
+			if (eventType == ICommProtocol::ChannelEventType::ChannelAdded)
 			{
 				if (this->GetChannel(channelId))
 					throw std::logic_error(std::format("a channel with the id {} already exists", channelId));
 				m_channels.push_back(std::make_shared<Channel>(channelId));
 			}
-			else
+			else if (eventType == ICommProtocol::ChannelEventType::ChannelRemoved)
 			{
 				const size_t channelIndex = this->GetChannelIndex(this->GetChannel(channelId));
 				(void)m_channels.erase(m_channels.begin() + channelIndex);
+			}
+			else
+			{
+				throw std::logic_error(std::format(
+					"Unhandled ICommProtocol::ChannelEventType in ChannelEventHandler: The event type with value {} is not implemented.",
+					static_cast<int>(eventType)
+				));
 			}
 		}
 

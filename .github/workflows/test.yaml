@@ -10,7 +10,7 @@ on:
     workflow_dispatch:
 
 jobs:
-  linux:
+  gcc:
     runs-on: ubuntu-latest
 
     steps:
@@ -37,3 +37,38 @@ jobs:
           echo "Running test..."
           sudo test/build/ProtoCommTest
 
+  clang:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y clang-18 g++ cmake libasio-dev socat
+
+          sudo update-alternatives --install /usr/bin/cc cc /usr/bin/clang-18 100
+          sudo update-alternatives --install /usr/bin/c++ c++ /usr/bin/clang++-18 100
+
+          clang --version
+          clang++ --version
+
+      - name: Configure CMake
+        env:
+          CC: /usr/bin/clang-18
+          CXX: /usr/bin/clang++-18
+        run: cmake -S test -B test/build
+
+      - name: Build
+        run: cmake --build test/build
+
+      - name: Run
+        run: |
+          echo "Starting virtual serial port loopback..."
+          sudo socat -d -d pty,raw,echo=0,link=/dev/ttyS10 pty,raw,echo=0,link=/dev/ttyS11 &
+          echo "Waiting for ports to initialize..."
+          sleep 2
+          echo "Running test..."
+          sudo test/build/ProtoCommTest
