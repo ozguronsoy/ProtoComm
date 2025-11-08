@@ -419,12 +419,12 @@ namespace ProtoComm
 			friend class CommStream;
 
 		private:
-			ICommProtocol::ChannelId m_channelId;
-			std::vector<uint8_t> m_rxBuffer;
+			ICommProtocol::ChannelId id;
+			std::vector<uint8_t> rxBuffer;
 
 		public:
 			Channel(ICommProtocol::ChannelId id)
-				: m_channelId(id)
+				: id(id)
 			{
 			}
 
@@ -433,7 +433,7 @@ namespace ProtoComm
 
 			ICommProtocol::ChannelId Id() const
 			{
-				return m_channelId;
+				return id;
 			}
 		};
 
@@ -503,7 +503,7 @@ namespace ProtoComm
 		 */
 		std::shared_ptr<Channel> GetChannel(ICommProtocol::ChannelId channelId)
 		{
-			auto it = std::find_if(m_channels.begin(), m_channels.end(), [channelId](const auto& ch) { return channelId == ch->m_channelId; });
+			auto it = std::find_if(m_channels.begin(), m_channels.end(), [channelId](const auto& ch) { return channelId == ch->id; });
 			return (it != m_channels.end()) ? (*it) : (std::shared_ptr<Channel>());
 		}
 
@@ -524,7 +524,7 @@ namespace ProtoComm
 		 */
 		bool IsRunning(std::shared_ptr<Channel> ch) const
 		{
-			return m_protocol.IsRunning(ch->m_channelId);
+			return m_protocol.IsRunning(ch->id);
 		}
 
 		/**
@@ -561,7 +561,7 @@ namespace ProtoComm
 		 */
 		void Stop(std::shared_ptr<Channel> ch)
 		{
-			m_protocol.Stop(ch->m_channelId);
+			m_protocol.Stop(ch->id);
 		}
 
 		/**
@@ -654,10 +654,10 @@ namespace ProtoComm
 
 			this->ValidatePrototypes(prototypes);
 
-			auto& rxBuffer = ch->m_rxBuffer;
+			auto& rxBuffer = ch->rxBuffer;
 			std::vector<std::unique_ptr<IRxMessage>> messages;
 			const clock::time_point t1 = clock::now();
-			const ICommProtocol::ChannelId channelId = ch->m_channelId;
+			const ICommProtocol::ChannelId channelId = ch->id;
 
 			if (n == 0)
 				return messages;
@@ -744,19 +744,17 @@ namespace ProtoComm
 			this->ValidatePrototypes(prototypes);
 
 			auto pPrototypes = std::make_shared<std::vector<RxMessagePrototype>>(prototypes.begin(), prototypes.end());
-			auto protocolCallback = std::make_shared<ICommProtocol::ReadCallback>();
-
-			(*protocolCallback) = [this, ch, callback, pPrototypes, protocolCallback](const std::error_code& ec, ICommProtocol::ChannelId channelId, std::span<const uint8_t> data)
+			auto protocolCallback = [this, ch, callback, pPrototypes](const std::error_code& ec, ICommProtocol::ChannelId channelId, std::span<const uint8_t> data)
 				{
 					std::vector<std::unique_ptr<IRxMessage>> messages;
 
 					if (!ec && data.size() > 0)
 					{
-						auto& rxBuffer = ch->m_rxBuffer;
+						auto& rxBuffer = ch->rxBuffer;
 						const size_t rxBufferOldSize = rxBuffer.size();
 						rxBuffer.resize(rxBufferOldSize + data.size());
 						(void)std::copy(data.begin(), data.end(), rxBuffer.begin() + rxBufferOldSize);
-						this->ParseRxMessages(*pPrototypes, rxBuffer, messages, std::numeric_limits<size_t>::max(), nullptr); // read all available messages
+						this->ParseRxMessages(*pPrototypes, rxBuffer, messages, std::numeric_limits<size_t>::max(), nullptr);
 					}
 
 					bool continueReading = true;
@@ -765,10 +763,10 @@ namespace ProtoComm
 						continueReading = callback(ec, ch, messages);
 
 					if (continueReading)
-						m_protocol.ReadAsync(channelId, *protocolCallback);
+						this->ReadAsync(ch, *pPrototypes, callback);
 				};
 
-			m_protocol.ReadAsync(ch->m_channelId, *protocolCallback);
+			m_protocol.ReadAsync(ch->id, protocolCallback);
 		}
 
 		/**
@@ -850,7 +848,7 @@ namespace ProtoComm
 
 				msg.get().Pack(frame);
 				frameHandler.Seal(msg, frame);
-				m_protocol.Write(ch->m_channelId, frame);
+				m_protocol.Write(ch->id, frame);
 			}
 		}
 
@@ -885,7 +883,7 @@ namespace ProtoComm
 					messagePositions[i + 1] = messagePositions[i] + frame.size();
 			}
 
-			m_protocol.WriteAsync(ch->m_channelId, buffer,
+			m_protocol.WriteAsync(ch->id, buffer,
 				[this, ch, callback, messagePositions](const std::error_code& ec, ICommProtocol::ChannelId channelId, size_t size)
 				{
 					auto it = std::find_if(messagePositions.begin(), messagePositions.end(), [size](size_t p) { return p >= size; });
