@@ -302,13 +302,15 @@ namespace ProtoComm
 
 	AsioTcpClient::AsioTcpClient()
 		: m_socket(m_ioCtx),
-		m_strand(asio::make_strand(m_ioCtx)),
-		m_workGuard(asio::make_work_guard(m_ioCtx))
+		m_workGuard(asio::make_work_guard(m_ioCtx)),
+		m_disposing(false),
+		m_ioThread(&AsioTcpClient::RunIoContext, this)
 	{
 	}
 
 	AsioTcpClient::~AsioTcpClient()
 	{
+		m_disposing = true;
 		if (this->IsRunning())
 			this->Stop();
 		m_workGuard.reset();
@@ -372,13 +374,11 @@ namespace ProtoComm
 		if (this->IsRunning())
 		{
 			asio::post(m_ioCtx,
-				asio::bind_executor(m_strand,
-					[this]()
-					{
-						m_channelEventCallback(k_channelId, ICommProtocol::ChannelEventType::ChannelRemoved);
-						m_socket.close();
-					}));
-			(void)m_ioThreads.emplace_back(&AsioTcpClient::RunIoContext, this);
+				[this]()
+				{
+					m_channelEventCallback(k_channelId, ICommProtocol::ChannelEventType::ChannelRemoved);
+					m_socket.close();
+				});
 		}
 	}
 
@@ -407,12 +407,10 @@ namespace ProtoComm
 
 		auto readBuffer = std::make_shared<std::vector<uint8_t>>(1024);
 		m_socket.async_read_some(asio::buffer(*readBuffer),
-			asio::bind_executor(m_strand,
-				[channelId, callback, readBuffer](const std::error_code& ec, size_t size)
-				{
-					callback(ec, channelId, std::span<const uint8_t>(readBuffer->begin(), size));
-				}));
-		(void)m_ioThreads.emplace_back(&AsioTcpClient::RunIoContext, this);
+			[channelId, callback, readBuffer](const std::error_code& ec, size_t size)
+			{
+				callback(ec, channelId, std::span<const uint8_t>(readBuffer->begin(), size));
+			});
 	}
 
 	void AsioTcpClient::Write(ICommProtocol::ChannelId channelId, std::span<const uint8_t> buffer)
@@ -434,17 +432,16 @@ namespace ProtoComm
 		}
 
 		asio::async_write(m_socket, asio::buffer(buffer),
-			asio::bind_executor(m_strand,
-				[channelId, callback](const asio::error_code& ec, size_t size)
-				{
-					callback(ec, channelId, size);
-				}));
-		(void)m_ioThreads.emplace_back(&AsioTcpClient::RunIoContext, this);
+			[channelId, callback](const asio::error_code& ec, size_t size)
+			{
+				callback(ec, channelId, size);
+			});
 	}
 
 	void AsioTcpClient::RunIoContext()
 	{
-		(void)m_ioCtx.run();
+		while (!m_disposing)
+			(void)m_ioCtx.run();
 	}
 
 #pragma endregion TCP Client

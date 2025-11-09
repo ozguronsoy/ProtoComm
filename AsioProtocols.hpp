@@ -97,10 +97,10 @@ namespace ProtoComm
 
 		asio::io_context m_ioCtx;
 		asio::ip::tcp::socket m_socket;
-		asio::strand<asio::io_context::executor_type> m_strand;
 		std::optional<asio::executor_work_guard<asio::io_context::executor_type>> m_workGuard;
 
-		std::vector<std::jthread> m_ioThreads;
+		std::atomic<bool> m_disposing;
+		std::jthread m_ioThread;
 
 	public:
 		AsioTcpClient();
