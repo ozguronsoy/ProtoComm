@@ -2,15 +2,14 @@
 #define PROTOCOMM_ASIO_PROTOCOLS_HPP
 
 #include "ProtoComm.hpp"
-#include <list>
 #include <asio.hpp>
-#include <asio/serial_port.hpp>
+#include <list>
 #include <optional>
 #include <functional>
 #include <string>
 #include <span>
-#include <cstdint>
 #include <mutex>
+#include <atomic>
 
 
 namespace ProtoComm
@@ -20,7 +19,7 @@ namespace ProtoComm
 	 */
 	class AsioSerialProtocol final : public ICommProtocol
 	{
-	public:
+	private:
 		struct Channel
 		{
 			ICommProtocol::ChannelId id;
@@ -40,17 +39,20 @@ namespace ProtoComm
 		asio::io_context m_ioCtx;
 		mutable std::list<Channel> m_channels; // AvailableReadSize requires native serial port handle, hence mutable
 
+		std::atomic<bool> m_disposing;
+		std::mutex m_removeThreadMutex;
+		std::vector<std::thread::id> m_threadIdsToRemove;
 		std::vector<std::jthread> m_ioThreads;
 
 	public:
-		AsioSerialProtocol() = default;
+		AsioSerialProtocol();
 		~AsioSerialProtocol();
 
 		AsioSerialProtocol(const AsioSerialProtocol&) = delete;
 		AsioSerialProtocol& operator=(const AsioSerialProtocol&) = delete;
 
-		const Channel& GetChannel(ICommProtocol::ChannelId channelId) const;
-		std::optional<std::reference_wrapper<const Channel>> GetChannel(const std::string& portName) const;
+		const asio::serial_port& Port(ICommProtocol::ChannelId channelId) const;
+		std::optional<std::reference_wrapper<const asio::serial_port>> Port(const std::string& name) const;
 
 		size_t ChannelCount() const override;
 		size_t AvailableReadSize(ICommProtocol::ChannelId channelId) const override;
@@ -78,6 +80,7 @@ namespace ProtoComm
 	private:
 		Channel& FindChannel(ICommProtocol::ChannelId channelId) const;
 		void RunIoContext();
+		void CleanFinishedThreads();
 	};
 
 	/**
@@ -89,10 +92,13 @@ namespace ProtoComm
 		static constexpr ICommProtocol::ChannelId k_channelId = 0;
 
 		ICommProtocol::ChannelEventCallback m_channelEventCallback;
+		
 		asio::io_context m_ioCtx;
 		asio::ip::tcp::socket m_socket;
 		asio::strand<asio::io_context::executor_type> m_strand;
-		std::vector<std::jthread> m_ioThreads;
+
+		std::atomic<bool> m_disposing;
+		std::jthread m_ioThread;
 
 	public:
 		AsioTcpClient();
@@ -113,15 +119,79 @@ namespace ProtoComm
 
 		void Stop() override;
 		void Stop(ICommProtocol::ChannelId channelId) override;
-		
+
 		size_t Read(ICommProtocol::ChannelId channelId, std::span<uint8_t> buffer) override;
 		void ReadAsync(ICommProtocol::ChannelId channelId, ICommProtocol::ReadCallback callback) override;
-		
+
 		void Write(ICommProtocol::ChannelId channelId, std::span<const uint8_t> buffer) override;
 		void WriteAsync(ICommProtocol::ChannelId channelId, std::span<const uint8_t> buffer, ICommProtocol::WriteCallback callback) override;
 
 	private:
 		void RunIoContext();
+	};
+
+	/**
+	 * @brief Implements a TCP server using asio where each channel is a client.
+	 */
+	class AsioTcpServer final : public ICommProtocol
+	{
+	private:
+		struct Channel
+		{
+			ICommProtocol::ChannelId id;
+			asio::ip::tcp::socket socket;
+			asio::strand<asio::io_context::executor_type> strand;
+
+			Channel(asio::io_context& ioCtx, const std::string& fullAddr);
+			Channel(const Channel&) = delete;
+			Channel& operator=(const Channel&) = delete;
+		};
+
+	private:
+		mutable std::mutex m_mutex;
+		ICommProtocol::ChannelEventCallback m_channelEventCallback;
+
+		asio::io_context m_ioCtx;
+		asio::ip::tcp::acceptor m_acceptor;
+		asio::strand<asio::io_context::executor_type> m_strand;
+		std::list<Channel> m_channels;
+
+		std::atomic<bool> m_disposing;
+		std::mutex m_removeThreadMutex;
+		std::vector<std::thread::id> m_threadIdsToRemove;
+		std::vector<std::jthread> m_ioThreads;
+
+	public:
+		AsioTcpServer();
+		~AsioTcpServer();
+
+		AsioTcpServer(const AsioTcpServer&) = delete;
+		AsioTcpServer& operator=(const AsioTcpServer&) = delete;
+
+		size_t ChannelCount() const override;
+		size_t AvailableReadSize(ICommProtocol::ChannelId channelId) const override;
+		bool IsRunning() const override;
+		bool IsRunning(ICommProtocol::ChannelId channelId) const override;
+		void SetChannelEventCallback(ICommProtocol::ChannelEventCallback callback) override;
+
+		std::optional<ICommProtocol::ChannelId> Start(const std::string& host, const std::string& port);
+
+		void Stop() override;
+		void Stop(ICommProtocol::ChannelId channelId) override;
+
+		size_t Read(ICommProtocol::ChannelId channelId, std::span<uint8_t> buffer) override;
+		void ReadAsync(ICommProtocol::ChannelId channelId, ICommProtocol::ReadCallback callback) override;
+
+		void Write(ICommProtocol::ChannelId channelId, std::span<const uint8_t> buffer) override;
+		void WriteAsync(ICommProtocol::ChannelId channelId, std::span<const uint8_t> buffer, ICommProtocol::WriteCallback callback) override;
+
+	private:
+		void RunAcceptor();
+		void RunAcceptorContext();
+		void RunIoContext();
+		void CleanFinishedThreads();
+		Channel& FindChannel(ICommProtocol::ChannelId channelId);
+		const Channel& FindChannel(ICommProtocol::ChannelId channelId) const;
 	};
 }
 

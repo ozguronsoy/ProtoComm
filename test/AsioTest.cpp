@@ -1,234 +1,36 @@
 #include <gtest/gtest.h>
 #include <random>
-#include "ProtoComm.hpp"
+#include "TestUtils.hpp"
 #include "AsioProtocols.hpp"
 
 using namespace ProtoComm;
 
-class TelemetryMessage : public IRxMessage, public ITxMessage
-{
-public:
-    float altitude = 0;
-    float latitude = 0;
-    float longitude = 0;
-    float temperature = 0;
-    float pressure = 0;
-    uint8_t state = 0;
-
-    bool operator==(const TelemetryMessage& rhs) const
-    {
-        return this->altitude == rhs.altitude &&
-            this->latitude == rhs.latitude &&
-            this->longitude == rhs.longitude &&
-            this->temperature == rhs.temperature &&
-            this->pressure == rhs.pressure &&
-            this->state == rhs.state;
-    }
-
-    std::optional<size_t> FrameSize() const override
-    {
-        return 21 + HeaderPattern().size() + FooterPattern().size() + 1; // +1 for checksum
-    }
-
-    std::span<const uint8_t> HeaderPattern() const override
-    {
-        static constexpr const std::array<uint8_t, 2> header = { 0xF2, 0xF5 };
-        return header;
-    }
-
-    std::span<const uint8_t> FooterPattern() const override
-    {
-        static constexpr const std::array<uint8_t, 2> footer = { 0x0D, 0x0A };
-        return footer;
-    }
-
-    IFrameHandler& FrameHandler() const override
-    {
-        return ChecksumFrameHandler<>::Instance();
-    }
-
-    std::unique_ptr<IMessage> Clone() const override
-    {
-        return std::make_unique<TelemetryMessage>(*this);
-    }
-
-    void Unpack(std::span<const uint8_t> frame) override
-    {
-        auto it = frame.begin() + this->HeaderPattern().size();
-
-        (void)std::memcpy(&altitude, &(*it), sizeof(float));
-        std::advance(it, sizeof(float));
-
-        (void)std::memcpy(&latitude, &(*it), sizeof(float));
-        std::advance(it, sizeof(float));
-        (void)std::memcpy(&longitude, &(*it), sizeof(float));
-        std::advance(it, sizeof(float));
-
-        (void)std::memcpy(&temperature, &(*it), sizeof(float));
-        std::advance(it, sizeof(float));
-        (void)std::memcpy(&pressure, &(*it), sizeof(float));
-        std::advance(it, sizeof(float));
-
-        state = *it;
-    }
-
-    void Pack(std::vector<uint8_t>& frame) const override
-    {
-        auto it = frame.begin() + this->HeaderPattern().size();
-
-        (void)std::memcpy(&(*it), &altitude, sizeof(float));
-        std::advance(it, sizeof(float));
-
-        (void)std::memcpy(&(*it), &latitude, sizeof(float));
-        std::advance(it, sizeof(float));
-        (void)std::memcpy(&(*it), &longitude, sizeof(float));
-        std::advance(it, sizeof(float));
-
-        (void)std::memcpy(&(*it), &temperature, sizeof(float));
-        std::advance(it, sizeof(float));
-        (void)std::memcpy(&(*it), &pressure, sizeof(float));
-        std::advance(it, sizeof(float));
-
-        (*it) = state;
-    }
-};
-
-class ImuMessage : public IRxMessage, public ITxMessage
-{
-public:
-    float ax = 0;
-    float ay = 0;
-    float az = 0;
-    float gx = 0;
-    float gy = 0;
-    float gz = 0;
-
-    bool operator==(const ImuMessage& rhs) const
-    {
-        return this->ax == rhs.ax &&
-            this->ay == rhs.ay &&
-            this->az == rhs.az &&
-            this->gx == rhs.gx &&
-            this->gy == rhs.gy &&
-            this->gz == rhs.gz;
-    }
-
-    std::optional<size_t> FrameSize() const override
-    {
-        return 24 + HeaderPattern().size() + FooterPattern().size() + 2; // +2 for checksum
-    }
-
-    std::span<const uint8_t> HeaderPattern() const override
-    {
-        static constexpr const std::array<uint8_t, 4> header = { 0xF7, 0xA5, 0x02, 0x3A };
-        return header;
-    }
-
-    std::span<const uint8_t> FooterPattern() const override
-    {
-        static constexpr const std::array<uint8_t, 2> footer = { 0x2C, 0x73 };
-        return footer;
-    }
-
-    IFrameHandler& FrameHandler() const override
-    {
-        return ChecksumFrameHandler<uint16_t>::Instance();
-    }
-
-    std::unique_ptr<IMessage> Clone() const override
-    {
-        return std::make_unique<ImuMessage>(*this);
-    }
-
-    void Unpack(std::span<const uint8_t> frame) override
-    {
-        auto it = frame.begin() + this->HeaderPattern().size();
-
-        (void)std::memcpy(&ax, &(*it), sizeof(float));
-        std::advance(it, sizeof(float));
-        (void)std::memcpy(&ay, &(*it), sizeof(float));
-        std::advance(it, sizeof(float));
-        (void)std::memcpy(&az, &(*it), sizeof(float));
-        std::advance(it, sizeof(float));
-
-        (void)std::memcpy(&gx, &(*it), sizeof(float));
-        std::advance(it, sizeof(float));
-        (void)std::memcpy(&gy, &(*it), sizeof(float));
-        std::advance(it, sizeof(float));
-        (void)std::memcpy(&gz, &(*it), sizeof(float));
-    }
-
-    void Pack(std::vector<uint8_t>& frame) const override
-    {
-        auto it = frame.begin() + this->HeaderPattern().size();
-
-        (void)std::memcpy(&(*it), &ax, sizeof(float));
-        std::advance(it, sizeof(float));
-        (void)std::memcpy(&(*it), &ay, sizeof(float));
-        std::advance(it, sizeof(float));
-        (void)std::memcpy(&(*it), &az, sizeof(float));
-        std::advance(it, sizeof(float));
-
-        (void)std::memcpy(&(*it), &gx, sizeof(float));
-        std::advance(it, sizeof(float));
-        (void)std::memcpy(&(*it), &gy, sizeof(float));
-        std::advance(it, sizeof(float));
-        (void)std::memcpy(&(*it), &gz, sizeof(float));
-    }
-};
-
-float random_float_0_100()
-{
-    static std::mt19937 generator(std::random_device{}());
-    static std::uniform_real_distribution<float> distribution(0.0f, 100.0f);
-    return distribution(generator);
-}
-
 TEST(AsioSerial, Loopback)
 {
-    using SerialStream = CommStream<AsioSerialProtocol>;
+    const size_t msgCountPerType = 10;
+    std::vector<TelemetryMessage> txTelemetryMessages(msgCountPerType);
+    std::vector<ImuMessage> txImuMessages(msgCountPerType);
+    const size_t totalMsgCount = GenerateTxMessages(msgCountPerType, txTelemetryMessages, txImuMessages);
 
-    constexpr const size_t msgCount = 10;
-
-    SerialStream serialStream;
-    std::vector<TelemetryMessage> txTelemetryMessages(msgCount);
-    std::vector<ImuMessage> txImuMessages(msgCount);
-
-    auto writeChannel = serialStream.Start("/dev/ttyS10", asio::serial_port_base::baud_rate(9600));
-    auto readChannel = serialStream.Start("/dev/ttyS11", asio::serial_port_base::baud_rate(9600));
+    CommStream<AsioSerialProtocol> stream;
+    auto writeChannel = stream.Start("/dev/ttyS10", asio::serial_port_base::baud_rate(9600));
+    auto readChannel = stream.Start("/dev/ttyS11", asio::serial_port_base::baud_rate(9600));
 
     EXPECT_TRUE(writeChannel);
     EXPECT_TRUE(readChannel);
 
-    for (size_t i = 0; i < msgCount; ++i)
+    for (size_t i = 0; i < msgCountPerType; ++i)
     {
-        txTelemetryMessages[i].altitude = random_float_0_100();
-        txTelemetryMessages[i].latitude = random_float_0_100();
-        txTelemetryMessages[i].longitude = random_float_0_100();
-        txTelemetryMessages[i].temperature = random_float_0_100();
-        txTelemetryMessages[i].pressure = random_float_0_100();
-        txTelemetryMessages[i].state = i;
-
-        txImuMessages[i].ax = random_float_0_100();
-        txImuMessages[i].ay = random_float_0_100();
-        txImuMessages[i].az = random_float_0_100();
-        txImuMessages[i].gx = random_float_0_100();
-        txImuMessages[i].gy = random_float_0_100();
-        txImuMessages[i].gz = random_float_0_100();
+        stream.Write(writeChannel, txTelemetryMessages[i]);
+        stream.Write(writeChannel, txImuMessages[i]);
     }
 
-    for (size_t i = 0; i < msgCount; ++i)
-    {
-        serialStream.Write(writeChannel, txTelemetryMessages[i]);
-        serialStream.Write(writeChannel, txImuMessages[i]);
-    }
+    auto rxMessages = stream.Read<TelemetryMessage, ImuMessage>(readChannel, totalMsgCount, std::chrono::milliseconds(5000));
 
-    auto rxMessages = serialStream.Read<TelemetryMessage, ImuMessage>(readChannel, (msgCount * 2), std::chrono::milliseconds(5000));
-
-    EXPECT_EQ(rxMessages.size(), (msgCount * 2));
+    EXPECT_EQ(rxMessages.size(), totalMsgCount);
 
     for (size_t i = 0, j = 0, k = 0;
-        i < (msgCount * 2);
+        i < totalMsgCount;
         ++i)
     {
         auto pTelemetryMessage = dynamic_cast<TelemetryMessage*>(rxMessages[i].get());
@@ -245,59 +47,40 @@ TEST(AsioSerial, Loopback)
 
 TEST(AsioSerial, LoopbackAsync)
 {
-    using SerialStream = CommStream<AsioSerialProtocol>;
+    const size_t msgCountPerType = 10;
+    std::vector<TelemetryMessage> txTelemetryMessages(msgCountPerType);
+    std::vector<ImuMessage> txImuMessages(msgCountPerType);
+    const size_t totalMsgCount = GenerateTxMessages(msgCountPerType, txTelemetryMessages, txImuMessages);
 
-    constexpr const size_t msgCount = 10;
-
-    SerialStream serialStream;
-    std::vector<TelemetryMessage> txTelemetryMessages(msgCount);
-    std::vector<ImuMessage> txImuMessages(msgCount);
-
-    auto writeChannel = serialStream.Start("/dev/ttyS10", asio::serial_port_base::baud_rate(9600));
-    auto readChannel = serialStream.Start("/dev/ttyS11", asio::serial_port_base::baud_rate(9600));
+    CommStream<AsioSerialProtocol> stream;
+    auto writeChannel = stream.Start("/dev/ttyS10", asio::serial_port_base::baud_rate(9600));
+    auto readChannel = stream.Start("/dev/ttyS11", asio::serial_port_base::baud_rate(9600));
 
     EXPECT_TRUE(writeChannel);
     EXPECT_TRUE(readChannel);
 
-    for (size_t i = 0; i < msgCount; ++i)
-    {
-        txTelemetryMessages[i].altitude = random_float_0_100();
-        txTelemetryMessages[i].latitude = random_float_0_100();
-        txTelemetryMessages[i].longitude = random_float_0_100();
-        txTelemetryMessages[i].temperature = random_float_0_100();
-        txTelemetryMessages[i].pressure = random_float_0_100();
-        txTelemetryMessages[i].state = i;
-
-        txImuMessages[i].ax = random_float_0_100();
-        txImuMessages[i].ay = random_float_0_100();
-        txImuMessages[i].az = random_float_0_100();
-        txImuMessages[i].gx = random_float_0_100();
-        txImuMessages[i].gy = random_float_0_100();
-        txImuMessages[i].gz = random_float_0_100();
-    }
-
-    auto fr = serialStream.ReadAsync<TelemetryMessage, ImuMessage>(readChannel, msgCount * 2);
+    auto fr = stream.ReadAsync<TelemetryMessage, ImuMessage>(readChannel, totalMsgCount);
 
     std::vector<std::reference_wrapper<const ITxMessage>> txMessages;
-    txMessages.reserve(msgCount * 2);
-    for (size_t i = 0; i < msgCount; ++i)
+    txMessages.reserve(totalMsgCount);
+    for (size_t i = 0; i < msgCountPerType; ++i)
     {
         txMessages.push_back(txTelemetryMessages[i]);
         txMessages.push_back(txImuMessages[i]);
     }
 
-    auto fw = serialStream.WriteAsync(writeChannel, txMessages);
+    auto fw = stream.WriteAsync(writeChannel, txMessages);
     fw.wait_for(std::chrono::milliseconds(5000));
     const size_t txCount = fw.get();
-    EXPECT_EQ(txCount, (msgCount * 2));
+    EXPECT_EQ(txCount, totalMsgCount);
 
     fr.wait_for(std::chrono::milliseconds(5000));
     auto rxMessages = fr.get();
 
-    EXPECT_EQ(rxMessages.size(), (msgCount * 2));
+    EXPECT_EQ(rxMessages.size(), totalMsgCount);
 
     for (size_t i = 0, j = 0, k = 0;
-        i < (msgCount * 2);
+        i < totalMsgCount;
         ++i)
     {
         auto pTelemetryMessage = dynamic_cast<TelemetryMessage*>(rxMessages[i].get());
@@ -309,5 +92,92 @@ TEST(AsioSerial, LoopbackAsync)
             EXPECT_EQ(*pTelemetryMessage, txTelemetryMessages[j++]);
         else if (pImuMessage)
             EXPECT_EQ(*pImuMessage, txImuMessages[k++]);
+    }
+}
+
+TEST(AsioTcp, Loopback)
+{
+    const size_t msgCountPerType = 10;
+    std::vector<TelemetryMessage> txTelemetryMessages(msgCountPerType);
+    std::vector<ImuMessage> txImuMessages(msgCountPerType);
+
+    CommStream<AsioTcpServer> server;
+    std::array<CommStream<AsioTcpClient>, 5> clients;
+
+    (void)server.Start("0.0.0.0", "5000");
+
+    EXPECT_TRUE(server.IsRunning());
+
+    for (size_t i = 0; i < clients.size(); ++i)
+    {
+        (void)clients[i].Start("127.0.0.1", "5000");
+        EXPECT_TRUE(clients[i].IsRunning());
+    }
+
+    {
+        size_t i = 0;
+        while (server.ChannelCount() != clients.size() && (i++ < 500))
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        EXPECT_EQ(server.ChannelCount(), clients.size());
+        if (server.ChannelCount() != clients.size())
+            return;
+    }
+
+    for (size_t c = 0; c < clients.size(); ++c)
+    {
+        auto& client = clients[c];
+
+        const size_t totalMsgCount = GenerateTxMessages(msgCountPerType, txTelemetryMessages, txImuMessages);
+
+        for (size_t i = 0; i < msgCountPerType; ++i)
+        {
+            client.Write(client.GetChannel(0), txTelemetryMessages[i]);
+            client.Write(client.GetChannel(0), txImuMessages[i]);
+        }
+
+        auto rxMessages = server.Read<TelemetryMessage, ImuMessage>(server.GetChannel(c), totalMsgCount, std::chrono::milliseconds(5000));
+
+        EXPECT_EQ(rxMessages.size(), totalMsgCount);
+
+        for (size_t i = 0, j = 0, k = 0;
+            i < totalMsgCount;
+            ++i)
+        {
+            auto pTelemetryMessage = dynamic_cast<TelemetryMessage*>(rxMessages[i].get());
+            auto pImuMessage = dynamic_cast<ImuMessage*>(rxMessages[i].get());
+
+            EXPECT_TRUE(pTelemetryMessage || pImuMessage);
+
+            if (pTelemetryMessage)
+                EXPECT_EQ(*pTelemetryMessage, txTelemetryMessages[j++]);
+            else if (pImuMessage)
+                EXPECT_EQ(*pImuMessage, txImuMessages[k++]);
+        }
+
+        rxMessages.clear();
+
+        for (size_t i = 0; i < msgCountPerType; ++i)
+        {
+            server.Write(server.GetChannel(c), txTelemetryMessages[i]);
+            server.Write(server.GetChannel(c), txImuMessages[i]);
+        }
+
+        rxMessages = client.Read<TelemetryMessage, ImuMessage>(client.GetChannel(0), totalMsgCount, std::chrono::milliseconds(5000));
+        EXPECT_EQ(rxMessages.size(), totalMsgCount);
+
+        for (size_t i = 0, j = 0, k = 0;
+            i < totalMsgCount;
+            ++i)
+        {
+            auto pTelemetryMessage = dynamic_cast<TelemetryMessage*>(rxMessages[i].get());
+            auto pImuMessage = dynamic_cast<ImuMessage*>(rxMessages[i].get());
+
+            EXPECT_TRUE(pTelemetryMessage || pImuMessage);
+
+            if (pTelemetryMessage)
+                EXPECT_EQ(*pTelemetryMessage, txTelemetryMessages[j++]);
+            else if (pImuMessage)
+                EXPECT_EQ(*pImuMessage, txImuMessages[k++]);
+        }
     }
 }

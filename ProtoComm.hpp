@@ -449,6 +449,7 @@ namespace ProtoComm
 		};
 
 	private:
+		mutable std::mutex m_mutex;
 		std::vector<std::shared_ptr<Channel>> m_channels;
 		Protocol m_protocol;
 
@@ -493,6 +494,8 @@ namespace ProtoComm
 		 */
 		size_t ChannelCount() const
 		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+
 			const size_t protocolChannelCount = m_protocol.ChannelCount();
 			const size_t streamChannelCount = m_channels.size();
 
@@ -512,10 +515,21 @@ namespace ProtoComm
 		 * @param channelId The unique id of the channel.
 		 * @return A shared pointer if the requested channel found, otherwise `nullptr`.
 		 */
-		std::shared_ptr<Channel> GetChannel(ICommProtocol::ChannelId channelId)
+		std::shared_ptr<Channel> GetChannelById(ICommProtocol::ChannelId channelId)
 		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+
 			auto it = std::find_if(m_channels.begin(), m_channels.end(), [channelId](const auto& ch) { return channelId == ch->id; });
 			return (it != m_channels.end()) ? (*it) : (std::shared_ptr<Channel>());
+		}
+
+		std::shared_ptr<Channel> GetChannel(size_t index)
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+
+			if (index >= m_channels.size())
+				throw std::out_of_range("index out of bounds");
+			return m_channels[index];
 		}
 
 		/**
@@ -552,7 +566,7 @@ namespace ProtoComm
 		{
 			std::optional<ICommProtocol::ChannelId> channelId = m_protocol.Start(std::forward<Args>(args)...);
 			if (channelId.has_value())
-				return this->GetChannel(*channelId);
+				return this->GetChannelById(*channelId);
 			return nullptr;
 		}
 
@@ -582,12 +596,14 @@ namespace ProtoComm
 		 */
 		size_t Prune()
 		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+
 			size_t channelsRemoved = 0;
-			for (size_t ch = this->ChannelCount(); (ch--) > 0;)
+			for (const auto& ch : m_channels)
 			{
-				if (!this->IsRunning(m_channels[ch]))
+				if (!this->IsRunning(ch))
 				{
-					this->Stop(m_channels[ch]);
+					this->Stop(ch);
 					channelsRemoved++;
 				}
 			}
@@ -928,16 +944,23 @@ namespace ProtoComm
 	private:
 		void ChannelEventHandler(ICommProtocol::ChannelId channelId, ICommProtocol::ChannelEventType eventType)
 		{
+
 			if (eventType == ICommProtocol::ChannelEventType::ChannelAdded)
 			{
-				if (this->GetChannel(channelId))
+				if (this->GetChannelById(channelId))
 					throw std::logic_error(std::format("a channel with the id {} already exists", channelId));
+
+				std::lock_guard<std::mutex> lock(m_mutex);
 				m_channels.push_back(std::make_shared<Channel>(channelId));
 			}
 			else if (eventType == ICommProtocol::ChannelEventType::ChannelRemoved)
 			{
-				const size_t channelIndex = this->GetChannelIndex(this->GetChannel(channelId));
-				(void)m_channels.erase(m_channels.begin() + channelIndex);
+				std::lock_guard<std::mutex> lock(m_mutex);
+
+				auto it = std::find_if(m_channels.begin(), m_channels.end(), [channelId](const auto& ch) { return ch->id == channelId; });
+				if (it == m_channels.end())
+					std::invalid_argument("channel not found");
+				(void)m_channels.erase(it);
 			}
 			else
 			{
@@ -950,15 +973,8 @@ namespace ProtoComm
 
 		bool ChannelExists(std::shared_ptr<Channel> ch) const
 		{
+			std::lock_guard<std::mutex> lock(m_mutex);
 			return std::find(m_channels.begin(), m_channels.end(), ch) != m_channels.end();
-		}
-
-		size_t GetChannelIndex(std::shared_ptr<Channel> ch) const
-		{
-			auto it = std::find(m_channels.begin(), m_channels.end(), ch);
-			if (it == m_channels.end())
-				std::invalid_argument("channel not found");
-			return static_cast<size_t>(std::distance(m_channels.begin(), it));
 		}
 
 		void ValidatePrototypes(std::span<const RxMessagePrototype> prototypes) const

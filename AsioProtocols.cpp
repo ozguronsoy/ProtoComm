@@ -20,26 +20,32 @@ namespace ProtoComm
 		id = std::hash<std::string>()(portName);
 	}
 
+	AsioSerialProtocol::AsioSerialProtocol()
+		: m_disposing(false)
+	{
+	}
+
 	AsioSerialProtocol::~AsioSerialProtocol()
 	{
+		m_disposing = true;
 		if (this->IsRunning())
 			this->Stop();
 	}
 
-	const AsioSerialProtocol::Channel& AsioSerialProtocol::GetChannel(ICommProtocol::ChannelId channelId) const
+	const asio::serial_port& AsioSerialProtocol::Port(ICommProtocol::ChannelId channelId) const
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
-		return this->FindChannel(channelId);
+		return this->FindChannel(channelId).port;
 	}
 
-	std::optional<std::reference_wrapper<const AsioSerialProtocol::Channel>> AsioSerialProtocol::GetChannel(const std::string& portName) const
+	std::optional<std::reference_wrapper<const asio::serial_port>> AsioSerialProtocol::Port(const std::string& name) const
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
 
-		auto it = std::find_if(m_channels.cbegin(), m_channels.cend(), [&portName](const Channel& ch) { return ch.portName == portName; });
+		auto it = std::find_if(m_channels.cbegin(), m_channels.cend(), [&name](const Channel& ch) { return ch.portName == name; });
 		if (it == m_channels.cend())
 			return std::nullopt;
-		return *it;
+		return it->port;
 	}
 
 	size_t AsioSerialProtocol::ChannelCount() const
@@ -143,25 +149,20 @@ namespace ProtoComm
 		{
 			if (ch.port.is_open())
 			{
-				Channel* pChannel = &ch;
 				asio::post(m_ioCtx,
 					asio::bind_executor(ch.strand,
-						[this, pChannel]()
+						[this, &ch]()
 						{
-							std::lock_guard<std::mutex> lock(m_mutex);
 
-							auto it = std::find_if(m_channels.begin(), m_channels.end(), [pChannel](const Channel& ch) { return &ch == pChannel; });
-							if (it != m_channels.end())
-							{
-								m_channelEventCallback(pChannel->id, ICommProtocol::ChannelEventType::ChannelRemoved);
-								pChannel->port.close();
-								(void)m_channels.erase(it);
-							}
+							m_channelEventCallback(ch.id, ICommProtocol::ChannelEventType::ChannelRemoved);
+							ch.port.close();
+
+							std::lock_guard<std::mutex> lock(m_mutex);
+							(void)m_channels.erase(std::find_if(m_channels.begin(), m_channels.end(), [&ch](const Channel& rhs) { return &ch == &rhs; }));
 						}));
+				(void)m_ioThreads.emplace_back(&AsioSerialProtocol::RunIoContext, this);
 			}
 		}
-
-		(void)m_ioThreads.emplace_back(&AsioSerialProtocol::RunIoContext, this);
 	}
 
 	void AsioSerialProtocol::Stop(ICommProtocol::ChannelId channelId)
@@ -169,24 +170,19 @@ namespace ProtoComm
 		std::lock_guard<std::mutex> lock(m_mutex);
 
 		Channel& ch = this->FindChannel(channelId);
-		Channel* pChannel = &ch;
 		if (ch.port.is_open())
 		{
 			asio::post(m_ioCtx,
 				asio::bind_executor(ch.strand,
-					[this, pChannel]()
+					[this, &ch]()
 					{
+
+						m_channelEventCallback(ch.id, ICommProtocol::ChannelEventType::ChannelRemoved);
+						ch.port.close();
+
 						std::lock_guard<std::mutex> lock(m_mutex);
-
-						auto it = std::find_if(m_channels.begin(), m_channels.end(), [pChannel](const Channel& ch) { return &ch == pChannel; });
-						if (it != m_channels.end())
-						{
-							m_channelEventCallback(pChannel->id, ICommProtocol::ChannelEventType::ChannelRemoved);
-							pChannel->port.close();
-							(void)m_channels.erase(it);
-						}
+						(void)m_channels.erase(std::find_if(m_channels.begin(), m_channels.end(), [&ch](const Channel& rhs) { return &ch == &rhs; }));
 					}));
-
 			(void)m_ioThreads.emplace_back(&AsioSerialProtocol::RunIoContext, this);
 		}
 	}
@@ -274,6 +270,29 @@ namespace ProtoComm
 	void AsioSerialProtocol::RunIoContext()
 	{
 		(void)m_ioCtx.run();
+
+		std::lock_guard<std::mutex> lock(m_removeThreadMutex);
+		m_threadIdsToRemove.push_back(std::this_thread::get_id());
+	}
+
+	void AsioSerialProtocol::CleanFinishedThreads()
+	{
+		while (!m_disposing)
+		{
+			std::lock_guard<std::mutex> l1(m_removeThreadMutex);
+			if (!m_threadIdsToRemove.empty())
+			{
+				std::lock_guard<std::mutex> l2(m_mutex);
+				for (const auto& tid : m_threadIdsToRemove)
+				{
+					auto it = std::find_if(m_ioThreads.begin(), m_ioThreads.end(), [tid](const std::jthread& t) { return t.get_id() == tid; });
+					if (it != m_ioThreads.end())
+						(void)m_ioThreads.erase(it);
+				}
+				m_threadIdsToRemove.clear();
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
 	}
 
 #pragma endregion Serial
@@ -282,12 +301,15 @@ namespace ProtoComm
 
 	AsioTcpClient::AsioTcpClient()
 		: m_socket(m_ioCtx),
-		m_strand(asio::make_strand(m_ioCtx))
+		m_strand(asio::make_strand(m_ioCtx)),
+		m_disposing(false),
+		m_ioThread(&AsioTcpClient::RunIoContext, this)
 	{
 	}
 
 	AsioTcpClient::~AsioTcpClient()
 	{
+		m_disposing = true;
 		if (this->IsRunning())
 			this->Stop();
 	}
@@ -339,6 +361,8 @@ namespace ProtoComm
 		}
 		catch (const std::exception& e)
 		{
+			if (m_socket.is_open())
+				m_socket.close();
 			return std::nullopt;
 		}
 	}
@@ -346,6 +370,7 @@ namespace ProtoComm
 	void AsioTcpClient::Stop()
 	{
 		if (this->IsRunning())
+		{
 			asio::post(m_ioCtx,
 				asio::bind_executor(m_strand,
 					[this]()
@@ -353,6 +378,7 @@ namespace ProtoComm
 						m_channelEventCallback(k_channelId, ICommProtocol::ChannelEventType::ChannelRemoved);
 						m_socket.close();
 					}));
+		}
 	}
 
 	void AsioTcpClient::Stop(ICommProtocol::ChannelId channelId)
@@ -385,8 +411,6 @@ namespace ProtoComm
 				{
 					callback(ec, channelId, std::span<const uint8_t>(readBuffer->begin(), size));
 				}));
-
-		(void)m_ioThreads.emplace_back(&AsioTcpClient::RunIoContext, this);
 	}
 
 	void AsioTcpClient::Write(ICommProtocol::ChannelId channelId, std::span<const uint8_t> buffer)
@@ -414,13 +438,302 @@ namespace ProtoComm
 					callback(ec, channelId, size);
 				}));
 
-		(void)m_ioThreads.emplace_back(&AsioTcpClient::RunIoContext, this);
 	}
 
 	void AsioTcpClient::RunIoContext()
 	{
-		m_ioCtx.run();
+		while (!m_disposing)
+		{
+			(void)m_ioCtx.run();
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
 	}
 
 #pragma endregion TCP Client
+
+#pragma region TCP Server
+
+	AsioTcpServer::Channel::Channel(asio::io_context& ioCtx, const std::string& fullAddr)
+		: socket(ioCtx),
+		strand(asio::make_strand(ioCtx))
+	{
+		id = std::hash<std::string>()(fullAddr);
+	}
+
+	AsioTcpServer::AsioTcpServer()
+		: m_acceptor(m_ioCtx),
+		m_strand(asio::make_strand(m_ioCtx)),
+		m_disposing(false)
+	{
+		(void)m_ioThreads.emplace_back(&AsioTcpServer::CleanFinishedThreads, this);
+		(void)m_ioThreads.emplace_back(&AsioTcpServer::RunAcceptorContext, this);
+	}
+
+	AsioTcpServer::~AsioTcpServer()
+	{
+		m_disposing = true;
+		if (this->IsRunning())
+			this->Stop();
+	}
+
+	size_t AsioTcpServer::ChannelCount() const
+	{
+		return m_channels.size();
+	}
+
+	size_t AsioTcpServer::AvailableReadSize(ICommProtocol::ChannelId channelId) const
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+
+		const Channel& ch = this->FindChannel(channelId);
+		return ch.socket.available();
+	}
+
+	bool AsioTcpServer::IsRunning() const
+	{
+		return m_acceptor.is_open();
+	}
+
+	bool AsioTcpServer::IsRunning(ICommProtocol::ChannelId channelId) const
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+
+		const Channel& ch = this->FindChannel(channelId);
+		return ch.socket.is_open();
+	}
+
+	void AsioTcpServer::SetChannelEventCallback(ICommProtocol::ChannelEventCallback callback)
+	{
+		if (!callback)
+			throw std::invalid_argument("channel event callback cannot be null");
+		m_channelEventCallback = callback;
+	}
+
+	std::optional<ICommProtocol::ChannelId> AsioTcpServer::Start(const std::string& host, const std::string& port)
+	{
+		if (!this->IsRunning())
+		{
+			try
+			{
+				asio::ip::tcp::resolver resolver(m_ioCtx);
+				asio::ip::tcp::endpoint ep = resolver.resolve(host, port)->endpoint();
+
+				m_acceptor.open(ep.protocol());
+				m_acceptor.set_option(asio::ip::tcp::acceptor::reuse_address(true));
+				m_acceptor.bind(ep);
+				m_acceptor.listen(asio::socket_base::max_listen_connections);
+
+				this->RunAcceptor();
+			}
+			catch (const std::exception&)
+			{
+				if (m_acceptor.is_open())
+					m_acceptor.close();
+			}
+		}
+
+		return std::nullopt;
+	}
+
+	void AsioTcpServer::Stop()
+	{
+		if (this->IsRunning())
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+
+			m_acceptor.close();
+
+			for (Channel& ch : m_channels)
+			{
+				if (ch.socket.is_open())
+				{
+					asio::post(
+						asio::bind_executor(ch.strand,
+							[this, &ch]()
+							{
+								m_channelEventCallback(ch.id, ICommProtocol::ChannelEventType::ChannelRemoved);
+								ch.socket.close();
+
+								std::lock_guard<std::mutex> lock(m_mutex);
+								(void)m_channels.erase(std::find_if(m_channels.begin(), m_channels.end(), [&ch](const Channel& rhs) { return &ch == &rhs; }));
+							}));
+					(void)m_ioThreads.emplace_back(&AsioTcpServer::RunIoContext, this);
+				}
+			}
+		}
+	}
+
+	void AsioTcpServer::Stop(ICommProtocol::ChannelId channelId)
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+
+		Channel& ch = this->FindChannel(channelId);
+		if (ch.socket.is_open())
+		{
+			asio::post(
+				asio::bind_executor(m_strand,
+					[this, &ch]()
+					{
+						m_channelEventCallback(ch.id, ICommProtocol::ChannelEventType::ChannelRemoved);
+						ch.socket.close();
+
+
+						std::lock_guard<std::mutex> lock(m_mutex);
+						(void)m_channels.erase(std::find_if(m_channels.begin(), m_channels.end(), [&ch](const Channel& rhs) { return &ch == &rhs; }));
+					}));
+			(void)m_ioThreads.emplace_back(&AsioTcpServer::RunIoContext, this);
+		}
+	}
+
+	size_t AsioTcpServer::Read(ICommProtocol::ChannelId channelId, std::span<uint8_t> buffer)
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+
+		Channel& ch = this->FindChannel(channelId);
+		if (!ch.socket.is_open())
+			return 0;
+		return asio::read(ch.socket, asio::buffer(buffer));
+	}
+
+	void AsioTcpServer::ReadAsync(ICommProtocol::ChannelId channelId, ICommProtocol::ReadCallback callback)
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+
+		if (!callback)
+			throw std::invalid_argument("callback cannot be null");
+
+		Channel& ch = this->FindChannel(channelId);
+		if (!ch.socket.is_open())
+		{
+			callback(std::make_error_code(std::errc::not_connected), ch.id, std::span<const uint8_t>{});
+			return;
+		}
+
+		auto readBuffer = std::make_shared<std::vector<uint8_t>>(1024);
+		ch.socket.async_read_some(asio::buffer(*readBuffer),
+			asio::bind_executor(ch.strand,
+				[channelId, callback, readBuffer](const std::error_code& ec, size_t size)
+				{
+					callback(ec, channelId, std::span<const uint8_t>(readBuffer->begin(), size));
+				}));
+		(void)m_ioThreads.emplace_back(&AsioTcpServer::RunIoContext, this);
+	}
+
+	void AsioTcpServer::Write(ICommProtocol::ChannelId channelId, std::span<const uint8_t> buffer)
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+
+		if (buffer.empty())
+			return;
+
+		Channel& ch = this->FindChannel(channelId);
+		if (!ch.socket.is_open())
+			return;
+		(void)asio::write(ch.socket, asio::buffer(buffer));
+	}
+
+	void AsioTcpServer::WriteAsync(ICommProtocol::ChannelId channelId, std::span<const uint8_t> buffer, ICommProtocol::WriteCallback callback)
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+
+		if (!callback)
+			throw std::invalid_argument("callback cannot be null");
+
+		Channel& ch = this->FindChannel(channelId);
+		if (!ch.socket.is_open())
+		{
+			callback(std::make_error_code(std::errc::not_connected), ch.id, 0);
+			return;
+		}
+
+		asio::async_write(ch.socket, asio::buffer(buffer),
+			asio::bind_executor(ch.strand,
+				[channelId, callback](const asio::error_code& ec, size_t size)
+				{
+					callback(ec, channelId, size);
+				}));
+		(void)m_ioThreads.emplace_back(&AsioTcpServer::RunIoContext, this);
+	}
+
+	void AsioTcpServer::RunAcceptor()
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+
+		auto socket = std::make_shared<asio::ip::tcp::socket>(m_ioCtx);
+		(void)m_acceptor.async_accept(*socket,
+			asio::bind_executor(m_strand,
+				[this, socket](const std::error_code& ec)
+				{
+					if (!ec)
+					{
+						ICommProtocol::ChannelId id{};
+						{
+							std::lock_guard<std::mutex> lock(m_mutex);
+
+							const auto ep = socket->remote_endpoint();
+							auto& ch = m_channels.emplace_back(m_ioCtx, std::format("{}:{}", ep.address().to_string(), ep.port()));
+							ch.socket = std::move(*socket);
+							id = ch.id;
+						}
+						m_channelEventCallback(id, ICommProtocol::ChannelEventType::ChannelAdded);
+					}
+
+					this->RunAcceptor();
+				}));
+	}
+
+	void AsioTcpServer::RunAcceptorContext()
+	{
+		while (!m_disposing)
+		{
+			(void)m_ioCtx.run();
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+	}
+
+	void AsioTcpServer::RunIoContext()
+	{
+		(void)m_ioCtx.run();
+
+		std::lock_guard<std::mutex> lock(m_removeThreadMutex);
+		m_threadIdsToRemove.push_back(std::this_thread::get_id());
+	}
+
+	void AsioTcpServer::CleanFinishedThreads()
+	{
+		while (!m_disposing)
+		{
+			std::lock_guard<std::mutex> l1(m_removeThreadMutex);
+			if (!m_threadIdsToRemove.empty())
+			{
+				std::lock_guard<std::mutex> l2(m_mutex);
+				for (const auto& tid : m_threadIdsToRemove)
+				{
+					auto it = std::find_if(m_ioThreads.begin(), m_ioThreads.end(), [tid](const std::jthread& t) { return t.get_id() == tid; });
+					if (it != m_ioThreads.end())
+						(void)m_ioThreads.erase(it);
+				}
+				m_threadIdsToRemove.clear();
+			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+	}
+
+	AsioTcpServer::Channel& AsioTcpServer::FindChannel(ICommProtocol::ChannelId channelId)
+	{
+		auto it = std::find_if(m_channels.begin(), m_channels.end(), [channelId](const Channel& ch) { return ch.id == channelId; });
+		if (it == m_channels.end())
+			throw std::invalid_argument(std::format("channel with the id '{}' not found.", channelId));
+		return *it;
+	}
+
+	const AsioTcpServer::Channel& AsioTcpServer::FindChannel(ICommProtocol::ChannelId channelId) const
+	{
+		auto it = std::find_if(m_channels.begin(), m_channels.end(), [channelId](const Channel& ch) { return ch.id == channelId; });
+		if (it == m_channels.end())
+			throw std::invalid_argument(std::format("channel with the id '{}' not found.", channelId));
+		return *it;
+	}
+
+#pragma endregion TCP Server
 }
