@@ -34,13 +34,15 @@ namespace ProtoComm
 
 	private:
 		mutable std::mutex m_mutex;
+		std::mutex m_removeThreadMutex;
+		std::atomic<bool> m_disposing;
+
 		ICommProtocol::ChannelEventCallback m_channelEventCallback;
 
 		asio::io_context m_ioCtx;
+		std::optional<asio::executor_work_guard<asio::io_context::executor_type>> m_workGuard;
 		mutable std::list<Channel> m_channels; // AvailableReadSize requires native serial port handle, hence mutable
 
-		std::atomic<bool> m_disposing;
-		std::mutex m_removeThreadMutex;
 		std::vector<std::thread::id> m_threadIdsToRemove;
 		std::vector<std::jthread> m_ioThreads;
 
@@ -92,13 +94,13 @@ namespace ProtoComm
 		static constexpr ICommProtocol::ChannelId k_channelId = 0;
 
 		ICommProtocol::ChannelEventCallback m_channelEventCallback;
-		
+
 		asio::io_context m_ioCtx;
 		asio::ip::tcp::socket m_socket;
 		asio::strand<asio::io_context::executor_type> m_strand;
+		std::optional<asio::executor_work_guard<asio::io_context::executor_type>> m_workGuard;
 
-		std::atomic<bool> m_disposing;
-		std::jthread m_ioThread;
+		std::vector<std::jthread> m_ioThreads;
 
 	public:
 		AsioTcpClient();
@@ -149,15 +151,17 @@ namespace ProtoComm
 
 	private:
 		mutable std::mutex m_mutex;
+		std::mutex m_removeThreadMutex;
+		std::atomic<bool> m_disposing;
+
 		ICommProtocol::ChannelEventCallback m_channelEventCallback;
 
 		asio::io_context m_ioCtx;
 		asio::ip::tcp::acceptor m_acceptor;
 		asio::strand<asio::io_context::executor_type> m_strand;
+		std::optional<asio::executor_work_guard<asio::io_context::executor_type>> m_workGuard;
 		std::list<Channel> m_channels;
 
-		std::atomic<bool> m_disposing;
-		std::mutex m_removeThreadMutex;
 		std::vector<std::thread::id> m_threadIdsToRemove;
 		std::vector<std::jthread> m_ioThreads;
 
@@ -187,7 +191,6 @@ namespace ProtoComm
 
 	private:
 		void RunAcceptor();
-		void RunAcceptorContext();
 		void RunIoContext();
 		void CleanFinishedThreads();
 		Channel& FindChannel(ICommProtocol::ChannelId channelId);

@@ -21,7 +21,8 @@ namespace ProtoComm
 	}
 
 	AsioSerialProtocol::AsioSerialProtocol()
-		: m_disposing(false)
+		: m_disposing(false),
+		m_workGuard(asio::make_work_guard(m_ioCtx))
 	{
 	}
 
@@ -30,6 +31,7 @@ namespace ProtoComm
 		m_disposing = true;
 		if (this->IsRunning())
 			this->Stop();
+		m_workGuard.reset();
 	}
 
 	const asio::serial_port& AsioSerialProtocol::Port(ICommProtocol::ChannelId channelId) const
@@ -84,7 +86,6 @@ namespace ProtoComm
 	bool AsioSerialProtocol::IsRunning() const
 	{
 		std::lock_guard<std::mutex> lock(m_mutex);
-
 		return std::find_if(m_channels.begin(), m_channels.end(), [](auto& channel) { return channel.port.is_open(); }) != m_channels.end();
 	}
 
@@ -302,16 +303,15 @@ namespace ProtoComm
 	AsioTcpClient::AsioTcpClient()
 		: m_socket(m_ioCtx),
 		m_strand(asio::make_strand(m_ioCtx)),
-		m_disposing(false),
-		m_ioThread(&AsioTcpClient::RunIoContext, this)
+		m_workGuard(asio::make_work_guard(m_ioCtx))
 	{
 	}
 
 	AsioTcpClient::~AsioTcpClient()
 	{
-		m_disposing = true;
 		if (this->IsRunning())
 			this->Stop();
+		m_workGuard.reset();
 	}
 
 	const asio::ip::tcp::socket& AsioTcpClient::Socket() const
@@ -378,6 +378,7 @@ namespace ProtoComm
 						m_channelEventCallback(k_channelId, ICommProtocol::ChannelEventType::ChannelRemoved);
 						m_socket.close();
 					}));
+			(void)m_ioThreads.emplace_back(&AsioTcpClient::RunIoContext, this);
 		}
 	}
 
@@ -411,6 +412,7 @@ namespace ProtoComm
 				{
 					callback(ec, channelId, std::span<const uint8_t>(readBuffer->begin(), size));
 				}));
+		(void)m_ioThreads.emplace_back(&AsioTcpClient::RunIoContext, this);
 	}
 
 	void AsioTcpClient::Write(ICommProtocol::ChannelId channelId, std::span<const uint8_t> buffer)
@@ -437,16 +439,12 @@ namespace ProtoComm
 				{
 					callback(ec, channelId, size);
 				}));
-
+		(void)m_ioThreads.emplace_back(&AsioTcpClient::RunIoContext, this);
 	}
 
 	void AsioTcpClient::RunIoContext()
 	{
-		while (!m_disposing)
-		{
-			(void)m_ioCtx.run();
-			std::this_thread::sleep_for(std::chrono::milliseconds(10));
-		}
+		(void)m_ioCtx.run();
 	}
 
 #pragma endregion TCP Client
@@ -461,12 +459,12 @@ namespace ProtoComm
 	}
 
 	AsioTcpServer::AsioTcpServer()
-		: m_acceptor(m_ioCtx),
+		: m_disposing(false),
+		m_acceptor(m_ioCtx),
 		m_strand(asio::make_strand(m_ioCtx)),
-		m_disposing(false)
+		m_workGuard(asio::make_work_guard(m_ioCtx))
 	{
 		(void)m_ioThreads.emplace_back(&AsioTcpServer::CleanFinishedThreads, this);
-		(void)m_ioThreads.emplace_back(&AsioTcpServer::RunAcceptorContext, this);
 	}
 
 	AsioTcpServer::~AsioTcpServer()
@@ -474,6 +472,7 @@ namespace ProtoComm
 		m_disposing = true;
 		if (this->IsRunning())
 			this->Stop();
+		m_workGuard.reset();
 	}
 
 	size_t AsioTcpServer::ChannelCount() const
@@ -542,7 +541,6 @@ namespace ProtoComm
 			std::lock_guard<std::mutex> lock(m_mutex);
 
 			m_acceptor.close();
-
 			for (Channel& ch : m_channels)
 			{
 				if (ch.socket.is_open())
@@ -664,31 +662,20 @@ namespace ProtoComm
 			asio::bind_executor(m_strand,
 				[this, socket](const std::error_code& ec)
 				{
-					if (!ec)
+					if (!ec && socket->is_open())
 					{
-						ICommProtocol::ChannelId id{};
-						{
-							std::lock_guard<std::mutex> lock(m_mutex);
+						std::lock_guard<std::mutex> lock(m_mutex);
 
-							const auto ep = socket->remote_endpoint();
-							auto& ch = m_channels.emplace_back(m_ioCtx, std::format("{}:{}", ep.address().to_string(), ep.port()));
-							ch.socket = std::move(*socket);
-							id = ch.id;
-						}
-						m_channelEventCallback(id, ICommProtocol::ChannelEventType::ChannelAdded);
+						const auto ep = socket->remote_endpoint();
+						auto& ch = m_channels.emplace_back(m_ioCtx, std::format("{}:{}", ep.address().to_string(), ep.port()));
+						ch.socket = std::move(*socket);
+						m_channelEventCallback(ch.id, ICommProtocol::ChannelEventType::ChannelAdded);
 					}
 
-					this->RunAcceptor();
+					if (!m_disposing)
+						this->RunAcceptor();
 				}));
-	}
-
-	void AsioTcpServer::RunAcceptorContext()
-	{
-		while (!m_disposing)
-		{
-			(void)m_ioCtx.run();
-			std::this_thread::sleep_for(std::chrono::milliseconds(10));
-		}
+		(void)m_ioThreads.emplace_back(&AsioTcpServer::RunIoContext, this);
 	}
 
 	void AsioTcpServer::RunIoContext()
