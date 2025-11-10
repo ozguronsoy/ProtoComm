@@ -153,7 +153,7 @@ namespace ProtoComm
 
 	/**
 	 * @brief Validates and seals the frame's header and footer.
-	 * 
+	 *
 	 */
 	class FrameHandler : public IFrameHandler
 	{
@@ -510,7 +510,7 @@ namespace ProtoComm
 
 		/**
 		 * @brief Gets the channel at the provided index.
-		 * 
+		 *
 		 * @param index The zero-based index of the channel.
 		 * @return A shared pointer if the requested channel if found, otherwise `nullptr`.
 		 */
@@ -549,7 +549,7 @@ namespace ProtoComm
 		 * @tparam Args The types of arguments required by the protocol's `Start` method.
 		 * @param args The arguments required by the protocol's `Start` method.
 		 *
-		 * @return A shared pointer to the channel if the protocol was started successfully, 
+		 * @return A shared pointer to the channel if the protocol was started successfully,
 		 * `nullptr` if it failed or if the communication protocol does not create a channel on start.
 		 */
 		template<typename... Args>
