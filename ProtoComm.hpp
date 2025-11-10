@@ -136,42 +136,31 @@ namespace ProtoComm
 		/**
 		 * @brief Validates an incoming raw data frame.
 		 *
-		 * @param msg A const reference to the `IRxMessage` type, used
-		 * to retrieve validation rules (e.g., `HeaderPattern()`).
-		 *
+		 * @param msg A prototyep message that will be used for retrieving validation rules.
 		 * @param frame Raw frame to be validated.
 		 * @return true if the frame's integrity is valid, false otherwise.
 		 */
-		virtual bool Validate(const IRxMessage& msg, std::span<const uint8_t> frame) const = 0;
+		virtual bool Validate(const IRxMessage& msg, std::span<const uint8_t> frame) = 0;
 
 		/**
-		 * @brief Finalizes ("seals") an outgoing raw data frame.
+		 * @brief Finalizes the outgoing raw data frame by adding required structural data (e.g., header, footer, checksum).
 		 *
-		 * @param msg A const reference to the `ITxMessage` type, used
-		 * to retrieve frame rules (e.g., `HeaderPattern()`).
-		 *
+		 * @param msg A prototyep message that will be used for retrieving validation rules.
 		 * @param frame Raw frame that will be modified in-place.
 		 */
-		virtual void Seal(const ITxMessage& msg, std::span<uint8_t> frame) const = 0;
+		virtual void Seal(const ITxMessage& msg, std::span<uint8_t> frame) = 0;
 	};
 
 	/**
-	 * @brief A base implementation of IFrameHandler that validates and seals
-	 * frame headers and footers.
-	 *
-	 * This class provides the fundamental logic for checking
-	 * header/footer patterns on `Validate` and writing them on `Seal`.
-	 *
-	 * It is intended to be used as a base class for more specialized
-	 * handlers (like `ChecksumFrameHandler`), which can call these
-	 * methods before adding their own logic (e.g., checksum validation).
+	 * @brief Validates and seals the frame's header and footer.
+	 * 
 	 */
 	class FrameHandler : public IFrameHandler
 	{
 	public:
 		virtual ~FrameHandler() = default;
 
-		virtual bool Validate(const IRxMessage& msg, std::span<const uint8_t> frame) const override
+		virtual bool Validate(const IRxMessage& msg, std::span<const uint8_t> frame) override
 		{
 			const auto frameSize = msg.FrameSize();
 			if (frameSize.has_value() && frame.size() != (*frameSize))
@@ -188,7 +177,7 @@ namespace ProtoComm
 			return true;
 		}
 
-		virtual void Seal(const ITxMessage& msg, std::span<uint8_t> frame) const override
+		virtual void Seal(const ITxMessage& msg, std::span<uint8_t> frame) override
 		{
 			auto headerPattern = msg.HeaderPattern();
 			(void)std::copy(headerPattern.begin(), headerPattern.end(), frame.begin());
@@ -208,7 +197,7 @@ namespace ProtoComm
 	};
 
 	/**
-	 * @brief A specialized `FrameHandler` that adds checksum validation.
+	 * @brief Validates and computes the checksum for a frame.
 	 *
 	 * @tparam TChecksum The data type of the checksum itself (e.g., `uint8_t`, `uint16_t`).
 	 * @tparam TData The data type of the payload elements being summed (default: `uint8_t`).
@@ -229,7 +218,7 @@ namespace ProtoComm
 			return static_cast<TChecksum>(std::accumulate(payloadBegin, payloadEnd, init, BinaryOp()));
 		}
 
-		virtual bool Validate(const IRxMessage& msg, std::span<const uint8_t> frame) const override
+		virtual bool Validate(const IRxMessage& msg, std::span<const uint8_t> frame) override
 		{
 			if (!FrameHandler::Validate(msg, frame))
 				return false;
@@ -243,7 +232,7 @@ namespace ProtoComm
 			return calculated == expected;
 		}
 
-		virtual void Seal(const ITxMessage& msg, std::span<uint8_t> frame) const override
+		virtual void Seal(const ITxMessage& msg, std::span<uint8_t> frame) override
 		{
 			FrameHandler::Seal(msg, frame);
 
@@ -270,11 +259,11 @@ namespace ProtoComm
 	{
 	public:
 		/**
-		 * @brief Specifies the type of event that occurred on a protocol channel.
+		 * @brief Specifies the type of the event that occurred on a protocol channel.
 		 */
 		enum class ChannelEventType
 		{
-			/** @biref Indicates that a new channel has been added to the protocol. */
+			/** @biref Indicates that a new channel has been added. */
 			ChannelAdded,
 			/** @brief Indicates that an existing channel has been removed. */
 			ChannelRemoved
@@ -286,7 +275,7 @@ namespace ProtoComm
 		using ChannelId = size_t;
 
 		/**
-		 * @brief Callback function type for channel events (new channel added or a channel removed).
+		 * @brief Callback function type for channel events.
 		 */
 		using ChannelEventCallback = std::function<void(ChannelId, ChannelEventType)>;
 
@@ -395,13 +384,9 @@ namespace ProtoComm
 	};
 
 	/**
-	 * @brief Manages a high-level, message-based communication channel.
+	 * @brief Manages message-based communication over a protocol.
 	 *
-	 * This class is the primary user-facing component of the ProtoComm library.
-	 * It handles connection management, frame parsing, and validation,
-	 * allowing the user to work directly with their defined message objects.
-	 *
-	 * @tparam Protocol The concrete transport protocol type (e.g., `TcpClient`, `SerialPort`).
+	 * @tparam Protocol The concrete type of the communication protocol (e.g., `TcpClient`, `SerialPort`).
 	 */
 	template<typename Protocol>
 		requires std::derived_from<Protocol, ICommProtocol>
@@ -488,7 +473,7 @@ namespace ProtoComm
 		}
 
 		/**
-		 * @brief Gets the current number of active channels from the protocol.
+		 * @brief Gets the number of active channels.
 		 *
 		 * @return The number of active channels.
 		 */
@@ -513,7 +498,7 @@ namespace ProtoComm
 		 * @brief Gets the channel with a specific id.
 		 *
 		 * @param channelId The unique id of the channel.
-		 * @return A shared pointer if the requested channel found, otherwise `nullptr`.
+		 * @return A shared pointer if the requested channel if found, otherwise `nullptr`.
 		 */
 		std::shared_ptr<Channel> GetChannelById(ICommProtocol::ChannelId channelId)
 		{
@@ -523,6 +508,12 @@ namespace ProtoComm
 			return (it != m_channels.end()) ? (*it) : (std::shared_ptr<Channel>());
 		}
 
+		/**
+		 * @brief Gets the channel at the provided index.
+		 * 
+		 * @param index The zero-based index of the channel.
+		 * @return A shared pointer if the requested channel if found, otherwise `nullptr`.
+		 */
 		std::shared_ptr<Channel> GetChannel(size_t index)
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
@@ -558,7 +549,8 @@ namespace ProtoComm
 		 * @tparam Args The types of arguments required by the protocol's `Start` method.
 		 * @param args The arguments required by the protocol's `Start` method.
 		 *
-		 * @return A shared pointer to the channel if the protocol was started successfully, `nullptr` if it failed.
+		 * @return A shared pointer to the channel if the protocol was started successfully, 
+		 * `nullptr` if it failed or if the communication protocol does not create a channel on start.
 		 */
 		template<typename... Args>
 			requires Startable<Protocol, Args...>
@@ -571,7 +563,7 @@ namespace ProtoComm
 		}
 
 		/**
-		 * @brief Stops the entire underlying communication protocol.
+		 * @brief Stops all channels and the underlying communication protocol.
 		 *
 		 */
 		void Stop()
@@ -580,7 +572,7 @@ namespace ProtoComm
 		}
 
 		/**
-		 * @brief Stops a single, specific communication channel.
+		 * @brief Stops a single communication channel.
 		 *
 		 * @param ch The channel to stop.
 		 */
@@ -611,25 +603,13 @@ namespace ProtoComm
 		}
 
 		/**
-		 * @brief Blocks until 'n' messages are read from a specific channel
-		 * or a timeout occurs.
+		 * @brief Blocks until 'n' messages are read from a specific channel or a timeout occurs.
 		 *
-		 * This function attempts to read a specified number of messages from
-		 * a specific channel, blocking the calling thread until the
-		 * conditions are met.
-		 *
-		 * @tparam RxMessages A variadic template pack of the concrete `IRxMessage` types to listen for.
+		 * @tparam RxMessages Message types to listen for.
 		 *
 		 * @param ch The channel from which to read messages.
-		 * @param n The desired number of messages to read.
-		 *
-		 * @param timeout The maximum duration to wait for the messages.
-		 * - If `std::chrono::milliseconds::zero()` (the default), this
-		 * function will block indefinitely until exactly 'n'
-		 * messages have been received.
-		 * - If greater than zero, the function will return after the
-		 * timeout expires, even if fewer than 'n' messages were
-		 * received.
+		 * @param n The number of messages to read.
+		 * @param timeout The maximum duration to wait for the messages where `0` means wait indefinitely.
 		 *
 		 * @return A vector containing the messages that were successfully parsed.
 		 */
@@ -648,21 +628,10 @@ namespace ProtoComm
 		 * @brief Blocks until 'n' messages are read from a specific channel
 		 * or a timeout occurs.
 		 *
-		 * This function attempts to read a specified number of messages from
-		 * a specific channel, blocking the calling thread until the
-		 * conditions are met.
-		 *
 		 * @param ch The channel from which to read messages.
 		 * @param prototypes A span of prototype instances that specifiy the types of messages to attempt to parse from the incoming data.
 		 * @param n The desired number of messages to read.
-		 *
-		 * @param timeout The maximum duration to wait for the messages.
-		 * - If `std::chrono::milliseconds::zero()` (the default), this
-		 * function will block indefinitely until exactly 'n'
-		 * messages have been received.
-		 * - If greater than zero, the function will return after the
-		 * timeout expires, even if fewer than 'n' messages were
-		 * received.
+		 * @param timeout The maximum duration to wait for the messages where `0` means wait indefinitely.
 		 *
 		 * @return A vector containing the messages that were successfully parsed.
 		 */
@@ -720,7 +689,7 @@ namespace ProtoComm
 		/**
 		 * @brief Reads messages from a specific channel asynchronously.
 		 *
-		 * @tparam RxMessages A variadic template pack of the concrete `IRxMessage` types to listen for.
+		 * @tparam RxMessages Message types to listen for.
 		 *
 		 * @param ch The channel from which to read messages.
 		 * @param callback The function that will be called when at least one message is parsed, or when an error occurs.
@@ -736,7 +705,7 @@ namespace ProtoComm
 		/**
 		 * @brief Reads at least 'n' messages from a specific channel asynchronously.
 		 *
-		 * @tparam RxMessages A variadic template pack of the concrete `IRxMessage` types to listen for.
+		 * @tparam RxMessages Message types to listen for.
 		 *
 		 * @param ch The channel from which to read messages.
 		 * @param n The desired number of messages to read.
