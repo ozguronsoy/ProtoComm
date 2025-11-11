@@ -1112,10 +1112,7 @@ namespace ProtoComm
 									fm.endIndex -= frameInfo.headerPattern.size();
 								}
 							}
-
-							(void)rxBuffer.erase(itFrameStart, itFrameStart + frameInfo.headerPattern.size());
-
-							itFrameStart = rxBuffer.begin();
+							itFrameStart = rxBuffer.erase(itFrameStart, itFrameStart + frameInfo.headerPattern.size());
 						}
 
 					} while (itFrameStart != rxBuffer.end() && messages.size() < n && (!checkTimeout || checkTimeout()));
