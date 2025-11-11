@@ -18,10 +18,6 @@ Implement ``IRxMessage`` when you only need to receive and parse the  message.
 class MyRxMessage : public IRxMessage
 {
 public:
-    float val1 = 0;
-    int val2 = 0;
-    char val3 = 0;
-
     std::optional<size_t> FrameSize() const override
     {
         // payload + header + footer + checksum
@@ -55,6 +51,10 @@ public:
         auto it = frame.begin() + this->HeaderPattern().size();
         // your unpacking logic
     }
+
+    float val1 = 0;
+    int val2 = 0;
+    char val3 = 0;
 };
 ```
 
@@ -66,11 +66,7 @@ Implement ``ITxMessage`` when you only need to create and send a specific messag
 class MyTxMessage : public ITxMessage
 {
 public:
-    float val1 = 0;
-    int val2 = 0;
-    char val3 = 0;
-
-    std::optional<size_t> FrameSize() const override
+    std::optional<size_t> FrameSize() const override
     {
         // payload + header + footer + checksum
         return 9 + HeaderPattern().size() + FooterPattern().size() + 1;
@@ -103,6 +99,10 @@ public:
         auto it = frame.begin() + this->HeaderPattern().size();
         // your packing logic
     }
+
+    float val1 = 0;
+    int val2 = 0;
+    char val3 = 0;
 };
 ```
 
@@ -114,10 +114,6 @@ A message can be bidirectional.
 class MyMessage : public IRxMessage, public ITxMessage
 {
 public:
-    float val1 = 0;
-    int val2 = 0;
-    char val3 = 0;
-
     std::optional<size_t> FrameSize() const override
     {
         // payload + header + footer + checksum
@@ -157,5 +153,9 @@ public:
         auto it = frame.begin() + this->HeaderPattern().size();
         // your packing logic
     }
+
+    float val1 = 0;
+    int val2 = 0;
+    char val3 = 0;
 };
 ```
