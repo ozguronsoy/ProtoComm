@@ -250,7 +250,7 @@ namespace ProtoComm
 
 #pragma endregion Frame Handlers
 
-#pragma region Comm
+#pragma region Comm Protocol
 
 	/**
 	 * @brief Interface for communication protocols.
@@ -263,7 +263,7 @@ namespace ProtoComm
 		 */
 		enum class ChannelEventType
 		{
-			/** @biref Indicates that a new channel has been added. */
+			/** @brief Indicates that a new channel has been added. */
 			ChannelAdded,
 			/** @brief Indicates that an existing channel has been removed. */
 			ChannelRemoved
@@ -382,6 +382,10 @@ namespace ProtoComm
 	{
 		{ t.Start(std::forward<Args>(args)...) } -> std::same_as<std::optional<ICommProtocol::ChannelId>>;
 	};
+
+#pragma endregion Comm Protocol
+
+#pragma region Comm Stream
 
 	/**
 	 * @brief Manages message-based communication over a protocol.
@@ -1191,7 +1195,7 @@ namespace ProtoComm
 		}
 	};
 
-#pragma endregion Comm
+#pragma endregion Comm Stream
 
 }
 

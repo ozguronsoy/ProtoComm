@@ -53,7 +53,20 @@ namespace ProtoComm
 		AsioSerialProtocol(const AsioSerialProtocol&) = delete;
 		AsioSerialProtocol& operator=(const AsioSerialProtocol&) = delete;
 
+		/**
+		 * @brief Gets the serial port of a specific channel.
+		 * 
+		 * @param channelId The unique id of the channel.
+		 * @return The serial port.
+		 */
 		const asio::serial_port& Port(ICommProtocol::ChannelId channelId) const;
+
+		/**
+		 * @brief Gets the serial port of a specific channel.
+		 * 
+		 * @param name The name of the port.
+		 * @return The serial port if found, `std::nullopt` otherwise.
+		 */
 		std::optional<std::reference_wrapper<const asio::serial_port>> Port(const std::string& name) const;
 
 		size_t ChannelCount() const override;
@@ -62,6 +75,17 @@ namespace ProtoComm
 		bool IsRunning(ICommProtocol::ChannelId channelId) const override;
 		void SetChannelEventCallback(ICommProtocol::ChannelEventCallback callback) override;
 
+		/**
+		 * @brief Opens a new serial port as a managable channel.
+		 * 
+		 * @param portName The name of the port to open.
+		 * @param baudRate The baud rate.
+		 * @param dataBits The number of data bits.
+		 * @param stopBits The number of stop bits.
+		 * @param parity The parity checking mode.
+		 * @param flowControl The flow control mode.
+		 * @return The unique id of the created channel on success, `std::nullopt` on fail.
+		 */
 		std::optional<ICommProtocol::ChannelId> Start(
 			const std::string& portName,
 			asio::serial_port_base::baud_rate baudRate,
@@ -109,6 +133,11 @@ namespace ProtoComm
 		AsioTcpClient(const AsioTcpClient&) = delete;
 		AsioTcpClient& operator=(const AsioTcpClient&) = delete;
 
+		/**
+		 * @brief Gets the tcp socket.
+		 * 
+		 * @return The tcp socket.
+		 */
 		const asio::ip::tcp::socket& Socket() const;
 
 		size_t ChannelCount() const override;
@@ -117,6 +146,13 @@ namespace ProtoComm
 		bool IsRunning(ICommProtocol::ChannelId channelId) const override;
 		void SetChannelEventCallback(ICommProtocol::ChannelEventCallback callback) override;
 
+		/**
+		 * @brief Connects to a remote server.
+		 * 
+		 * @param host The hostname or IP address of the server.
+		 * @param port The port number.
+		 * @return The unique id of the channel on success, `std::nullopt` on fail.
+		 */
 		std::optional<ICommProtocol::ChannelId> Start(const std::string& host, const std::string& port);
 
 		void Stop() override;
@@ -178,6 +214,16 @@ namespace ProtoComm
 		bool IsRunning(ICommProtocol::ChannelId channelId) const override;
 		void SetChannelEventCallback(ICommProtocol::ChannelEventCallback callback) override;
 
+		/**
+		 * @brief Starts the server and begins listening.
+		 * 
+		 * @note The channels represent clients in this protocol, 
+		 * hence this method will always return `std::nullopt`.
+		 * 
+		 * @param host The local IP address to bind to.
+		 * @param port The port number to listen on.
+		 * @return Always `std::nullopt`.
+		 */
 		std::optional<ICommProtocol::ChannelId> Start(const std::string& host, const std::string& port);
 
 		void Stop() override;
