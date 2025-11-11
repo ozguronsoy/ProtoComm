@@ -19,33 +19,6 @@ namespace ProtoComm
 	 */
 	class AsioSerialProtocol final : public ICommProtocol
 	{
-	private:
-		struct Channel
-		{
-			ICommProtocol::ChannelId id;
-			std::string portName;
-			asio::serial_port port;
-			asio::strand<asio::io_context::executor_type> strand;
-
-			Channel(asio::io_context& ioCtx, const std::string& portName);
-			Channel(const Channel&) = delete;
-			Channel& operator=(const Channel&) = delete;
-		};
-
-	private:
-		mutable std::mutex m_mutex;
-		std::mutex m_removeThreadMutex;
-		std::atomic<bool> m_disposing;
-
-		ICommProtocol::ChannelEventCallback m_channelEventCallback;
-
-		asio::io_context m_ioCtx;
-		std::optional<asio::executor_work_guard<asio::io_context::executor_type>> m_workGuard;
-		mutable std::list<Channel> m_channels; // AvailableReadSize requires native serial port handle, hence mutable
-
-		std::vector<std::thread::id> m_threadIdsToRemove;
-		std::vector<std::jthread> m_ioThreads;
-
 	public:
 		AsioSerialProtocol();
 		~AsioSerialProtocol();
@@ -55,7 +28,7 @@ namespace ProtoComm
 
 		/**
 		 * @brief Gets the serial port of a specific channel.
-		 * 
+		 *
 		 * @param channelId The unique id of the channel.
 		 * @return The serial port.
 		 */
@@ -63,7 +36,7 @@ namespace ProtoComm
 
 		/**
 		 * @brief Gets the serial port of a specific channel.
-		 * 
+		 *
 		 * @param name The name of the port.
 		 * @return The serial port if found, `std::nullopt` otherwise.
 		 */
@@ -77,7 +50,7 @@ namespace ProtoComm
 
 		/**
 		 * @brief Opens a new serial port as a managable channel.
-		 * 
+		 *
 		 * @param portName The name of the port to open.
 		 * @param baudRate The baud rate.
 		 * @param dataBits The number of data bits.
@@ -104,9 +77,34 @@ namespace ProtoComm
 		void WriteAsync(ICommProtocol::ChannelId channelId, std::span<const uint8_t> buffer, ICommProtocol::WriteCallback callback) override;
 
 	private:
+		struct Channel
+		{
+			ICommProtocol::ChannelId id;
+			std::string portName;
+			asio::serial_port port;
+			asio::strand<asio::io_context::executor_type> strand;
+
+			Channel(asio::io_context& ioCtx, const std::string& portName);
+			Channel(const Channel&) = delete;
+			Channel& operator=(const Channel&) = delete;
+		};
+
 		Channel& FindChannel(ICommProtocol::ChannelId channelId) const;
 		void RunIoContext();
 		void CleanFinishedThreads();
+
+		mutable std::mutex m_mutex;
+		std::mutex m_removeThreadMutex;
+		std::atomic<bool> m_disposing;
+
+		ICommProtocol::ChannelEventCallback m_channelEventCallback;
+
+		asio::io_context m_ioCtx;
+		std::optional<asio::executor_work_guard<asio::io_context::executor_type>> m_workGuard;
+		mutable std::list<Channel> m_channels; // AvailableReadSize requires native serial port handle, hence mutable
+
+		std::vector<std::thread::id> m_threadIdsToRemove;
+		std::vector<std::jthread> m_ioThreads;
 	};
 
 	/**
@@ -114,18 +112,6 @@ namespace ProtoComm
 	 */
 	class AsioTcpClient final : public ICommProtocol
 	{
-	private:
-		static constexpr ICommProtocol::ChannelId k_channelId = 0;
-
-		ICommProtocol::ChannelEventCallback m_channelEventCallback;
-
-		asio::io_context m_ioCtx;
-		asio::ip::tcp::socket m_socket;
-		std::optional<asio::executor_work_guard<asio::io_context::executor_type>> m_workGuard;
-
-		std::atomic<bool> m_disposing;
-		std::jthread m_ioThread;
-
 	public:
 		AsioTcpClient();
 		~AsioTcpClient();
@@ -135,7 +121,7 @@ namespace ProtoComm
 
 		/**
 		 * @brief Gets the tcp socket.
-		 * 
+		 *
 		 * @return The tcp socket.
 		 */
 		const asio::ip::tcp::socket& Socket() const;
@@ -148,7 +134,7 @@ namespace ProtoComm
 
 		/**
 		 * @brief Connects to a remote server.
-		 * 
+		 *
 		 * @param host The hostname or IP address of the server.
 		 * @param port The port number.
 		 * @return The unique id of the channel on success, `std::nullopt` on fail.
@@ -166,6 +152,18 @@ namespace ProtoComm
 
 	private:
 		void RunIoContext();
+
+		ICommProtocol::ChannelEventCallback m_channelEventCallback;
+
+		asio::io_context m_ioCtx;
+		asio::ip::tcp::socket m_socket;
+		std::optional<asio::executor_work_guard<asio::io_context::executor_type>> m_workGuard;
+
+		std::atomic<bool> m_disposing;
+		std::jthread m_ioThread;
+
+		static constexpr ICommProtocol::ChannelId k_channelId = 0;
+
 	};
 
 	/**
@@ -173,34 +171,6 @@ namespace ProtoComm
 	 */
 	class AsioTcpServer final : public ICommProtocol
 	{
-	private:
-		struct Channel
-		{
-			ICommProtocol::ChannelId id;
-			asio::ip::tcp::socket socket;
-			asio::strand<asio::io_context::executor_type> strand;
-
-			Channel(asio::io_context& ioCtx, const std::string& fullAddr);
-			Channel(const Channel&) = delete;
-			Channel& operator=(const Channel&) = delete;
-		};
-
-	private:
-		mutable std::mutex m_mutex;
-		std::mutex m_removeThreadMutex;
-		std::atomic<bool> m_disposing;
-
-		ICommProtocol::ChannelEventCallback m_channelEventCallback;
-
-		asio::io_context m_ioCtx;
-		asio::ip::tcp::acceptor m_acceptor;
-		asio::strand<asio::io_context::executor_type> m_strand;
-		std::optional<asio::executor_work_guard<asio::io_context::executor_type>> m_workGuard;
-		std::list<Channel> m_channels;
-
-		std::vector<std::thread::id> m_threadIdsToRemove;
-		std::vector<std::jthread> m_ioThreads;
-
 	public:
 		AsioTcpServer();
 		~AsioTcpServer();
@@ -216,10 +186,10 @@ namespace ProtoComm
 
 		/**
 		 * @brief Starts the server and begins listening.
-		 * 
-		 * @note The channels represent clients in this protocol, 
+		 *
+		 * @note The channels represent clients in this protocol,
 		 * hence this method will always return `std::nullopt`.
-		 * 
+		 *
 		 * @param host The local IP address to bind to.
 		 * @param port The port number to listen on.
 		 * @return Always `std::nullopt`.
@@ -236,12 +206,38 @@ namespace ProtoComm
 		void WriteAsync(ICommProtocol::ChannelId channelId, std::span<const uint8_t> buffer, ICommProtocol::WriteCallback callback) override;
 
 	private:
+		struct Channel
+		{
+			ICommProtocol::ChannelId id;
+			asio::ip::tcp::socket socket;
+			asio::strand<asio::io_context::executor_type> strand;
+
+			Channel(asio::io_context& ioCtx, const std::string& fullAddr);
+			Channel(const Channel&) = delete;
+			Channel& operator=(const Channel&) = delete;
+		};
+
 		void RunAcceptor();
 		void RunAcceptorContext();
 		void RunIoContext();
 		void CleanFinishedThreads();
 		Channel& FindChannel(ICommProtocol::ChannelId channelId);
 		const Channel& FindChannel(ICommProtocol::ChannelId channelId) const;
+
+		mutable std::mutex m_mutex;
+		std::mutex m_removeThreadMutex;
+		std::atomic<bool> m_disposing;
+
+		ICommProtocol::ChannelEventCallback m_channelEventCallback;
+
+		asio::io_context m_ioCtx;
+		asio::ip::tcp::acceptor m_acceptor;
+		asio::strand<asio::io_context::executor_type> m_strand;
+		std::optional<asio::executor_work_guard<asio::io_context::executor_type>> m_workGuard;
+		std::list<Channel> m_channels;
+
+		std::vector<std::thread::id> m_threadIdsToRemove;
+		std::vector<std::jthread> m_ioThreads;
 	};
 }
 

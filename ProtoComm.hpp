@@ -396,32 +396,13 @@ namespace ProtoComm
 		requires std::derived_from<Protocol, ICommProtocol>
 	class CommStream final
 	{
-	private:
-		struct FrameInfo
-		{
-			std::optional<size_t> size;
-			std::span<const uint8_t> headerPattern;
-			std::span<const uint8_t> footerPattern;
-			std::reference_wrapper<IFrameHandler> handler;
-
-			FrameInfo(std::optional<size_t> fs, std::span<const uint8_t> hp, std::span<const uint8_t> fp, IFrameHandler& fh)
-				: size(fs),
-				headerPattern(hp),
-				footerPattern(fp),
-				handler(fh)
-			{
-			}
-		};
-
 	public:
+		/**
+		 * @brief Represents a communication channel.
+		 * 
+		 */
 		class Channel
 		{
-			friend class CommStream;
-
-		private:
-			ICommProtocol::ChannelId id;
-			std::vector<uint8_t> rxBuffer;
-
 		public:
 			Channel(ICommProtocol::ChannelId id)
 				: id(id)
@@ -431,18 +412,23 @@ namespace ProtoComm
 			Channel(const Channel&) = delete;
 			Channel& operator=(const Channel&) = delete;
 
+			/**
+			 * @brief Gets the unique id.
+			 * 
+			 * @return The unique id.
+			 */
 			ICommProtocol::ChannelId Id() const
 			{
 				return id;
 			}
+
+		private:
+			friend class CommStream;
+
+			ICommProtocol::ChannelId id;
+			std::vector<uint8_t> rxBuffer;
 		};
 
-	private:
-		mutable std::mutex m_mutex;
-		std::vector<std::shared_ptr<Channel>> m_channels;
-		Protocol m_protocol;
-
-	public:
 		/**
 		 * @brief Callback function type for async read operations.
 		 * @return `true` to continue reading, `false` to stop.
@@ -457,7 +443,6 @@ namespace ProtoComm
 		 */
 		using RxMessagePrototype = std::shared_ptr<const IRxMessage>;
 
-	public:
 		CommStream()
 		{
 			m_protocol.SetChannelEventCallback(std::bind(&CommStream::ChannelEventHandler, this, std::placeholders::_1, std::placeholders::_2));
@@ -917,6 +902,22 @@ namespace ProtoComm
 		}
 
 	private:
+		struct FrameInfo
+		{
+			std::optional<size_t> size;
+			std::span<const uint8_t> headerPattern;
+			std::span<const uint8_t> footerPattern;
+			std::reference_wrapper<IFrameHandler> handler;
+
+			FrameInfo(std::optional<size_t> fs, std::span<const uint8_t> hp, std::span<const uint8_t> fp, IFrameHandler& fh)
+				: size(fs),
+				headerPattern(hp),
+				footerPattern(fp),
+				handler(fh)
+			{
+			}
+		};
+
 		void ChannelEventHandler(ICommProtocol::ChannelId channelId, ICommProtocol::ChannelEventType eventType)
 		{
 			if (eventType == ICommProtocol::ChannelEventType::ChannelAdded)
@@ -1016,7 +1017,7 @@ namespace ProtoComm
 					}
 				};
 
-				std::vector<FrameMatch> frameMatches;
+				std::vector<FrameMatch> matchedFrames;
 
 				for (size_t i = 0;
 					i < prototypes.size() && messages.size() < n && (!checkTimeout || checkTimeout());
@@ -1094,7 +1095,7 @@ namespace ProtoComm
 						const std::span<uint8_t> frame(itFrameStart, itFrameEnd);
 						if (frameHandler.Validate(prototype, frame))
 						{
-							(void)frameMatches.emplace_back(
+							(void)matchedFrames.emplace_back(
 								prototype,
 								static_cast<size_t>(std::distance(rxBuffer.begin(), itFrameStart)),
 								static_cast<size_t>(std::distance(rxBuffer.begin(), itFrameEnd)));
@@ -1104,12 +1105,12 @@ namespace ProtoComm
 						else
 						{
 							// adjust previously found frame positions
-							for (auto& fm : frameMatches)
+							for (auto& matchedFrame : matchedFrames)
 							{
-								if (fm.startIndex > static_cast<size_t>(std::distance(rxBuffer.begin(), itFrameStart)))
+								if (matchedFrame.startIndex > static_cast<size_t>(std::distance(rxBuffer.begin(), itFrameStart)))
 								{
-									fm.startIndex -= frameInfo.headerPattern.size();
-									fm.endIndex -= frameInfo.headerPattern.size();
+									matchedFrame.startIndex -= frameInfo.headerPattern.size();
+									matchedFrame.endIndex -= frameInfo.headerPattern.size();
 								}
 							}
 							itFrameStart = rxBuffer.erase(itFrameStart, itFrameStart + frameInfo.headerPattern.size());
@@ -1120,24 +1121,24 @@ namespace ProtoComm
 
 				// no more frames in rx buffer
 				// break the loop to read more bytes
-				if (frameMatches.empty())
+				if (matchedFrames.empty())
 					break;
 
 				// unpack frames in order of arrival
 
-				std::sort(frameMatches.begin(),
-					frameMatches.end(),
+				std::sort(matchedFrames.begin(),
+					matchedFrames.end(),
 					[](const auto& a, const auto& b)
 					{
 						return a.startIndex < b.startIndex;
 					});
 
 				size_t offset = 0;
-				for (auto& fm : frameMatches)
+				for (auto& matchedFrame : matchedFrames)
 				{
-					const IRxMessage& prototype = fm.prototype.get();
-					auto itFrameStart = rxBuffer.begin() + (fm.startIndex - offset);
-					auto itFrameEnd = rxBuffer.begin() + (fm.endIndex - offset);
+					const IRxMessage& prototype = matchedFrame.prototype.get();
+					auto itFrameStart = rxBuffer.begin() + (matchedFrame.startIndex - offset);
+					auto itFrameEnd = rxBuffer.begin() + (matchedFrame.endIndex - offset);
 					const std::span<uint8_t> frame(itFrameStart, itFrameEnd);
 
 					std::unique_ptr<IRxMessage> msg(dynamic_cast<IRxMessage*>(prototype.Clone().release()));
@@ -1191,6 +1192,10 @@ namespace ProtoComm
 				rxBuffer.clear();
 			}
 		}
+
+		mutable std::mutex m_mutex;
+		std::vector<std::shared_ptr<Channel>> m_channels;
+		Protocol m_protocol;
 	};
 
 #pragma endregion Comm Stream

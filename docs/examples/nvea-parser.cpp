@@ -84,15 +84,6 @@ public:
 class GPGGAMessage : public IRxMessage
 {
 public:
-    std::string time;
-    double latitude = 0.0;
-    char latDirection = 'N';
-    double longitude = 0.0;
-    char lonDirection = 'E';
-    int quality = 0;
-    int numSatellites = 0;
-    double altitude = 0.0;
-
     // NMEA is variable-size
     std::optional<size_t> FrameSize() const override
     {
@@ -161,14 +152,20 @@ public:
             std::cerr << "Failed to unpack GPGGA: " << e.what() << std::endl;
         }
     }
+
+    std::string time;
+    double latitude = 0.0;
+    char latDirection = 'N';
+    double longitude = 0.0;
+    char lonDirection = 'E';
+    int quality = 0;
+    int numSatellites = 0;
+    double altitude = 0.0;
 };
 
 class LatLonMessage : public ITxMessage
 {
 public:
-    double latitude = 0.0;
-    double longitude = 0.0;
-
     std::optional<size_t> FrameSize() const override
     {
         return std::nullopt;
@@ -211,6 +208,9 @@ public:
         auto it = frame.begin() + HeaderPattern().size();
         it = std::copy(payload.begin(), payload.end(), it);
     }
+
+    double latitude = 0.0;
+    double longitude = 0.0;
 };
 
 /*

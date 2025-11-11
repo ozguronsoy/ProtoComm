@@ -9,13 +9,6 @@ using namespace ProtoComm;
 class TelemetryMessage : public IRxMessage, public ITxMessage
 {
 public:
-    float altitude = 0;
-    float latitude = 0;
-    float longitude = 0;
-    float temperature = 0;
-    float pressure = 0;
-    uint8_t state = 0;
-
     bool operator==(const TelemetryMessage& rhs) const
     {
         return this->altitude == rhs.altitude &&
@@ -92,18 +85,18 @@ public:
 
         (*it) = state;
     }
+
+    float altitude = 0;
+    float latitude = 0;
+    float longitude = 0;
+    float temperature = 0;
+    float pressure = 0;
+    uint8_t state = 0;
 };
 
 class ImuMessage : public IRxMessage, public ITxMessage
 {
 public:
-    float ax = 0;
-    float ay = 0;
-    float az = 0;
-    float gx = 0;
-    float gy = 0;
-    float gz = 0;
-
     bool operator==(const ImuMessage& rhs) const
     {
         return this->ax == rhs.ax &&
@@ -176,6 +169,13 @@ public:
         std::advance(it, sizeof(float));
         (void)std::memcpy(&(*it), &gz, sizeof(float));
     }
+
+    float ax = 0;
+    float ay = 0;
+    float az = 0;
+    float gx = 0;
+    float gy = 0;
+    float gz = 0;
 };
 
 float GenerateRandomFloat()
