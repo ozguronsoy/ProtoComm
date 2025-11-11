@@ -483,9 +483,9 @@ namespace ProtoComm
 		 */
 		size_t ChannelCount() const
 		{
-			std::lock_guard<std::mutex> lock(m_mutex);
-
 			const size_t protocolChannelCount = m_protocol.ChannelCount();
+
+			std::lock_guard<std::mutex> lock(m_mutex);
 			const size_t streamChannelCount = m_channels.size();
 
 			if (protocolChannelCount != streamChannelCount)
@@ -509,7 +509,9 @@ namespace ProtoComm
 			std::lock_guard<std::mutex> lock(m_mutex);
 
 			auto it = std::find_if(m_channels.begin(), m_channels.end(), [channelId](const auto& ch) { return channelId == ch->id; });
-			return (it != m_channels.end()) ? (*it) : (std::shared_ptr<Channel>());
+			if (it != m_channels.end())
+				return *it;
+			return nullptr;
 		}
 
 		/**
@@ -917,7 +919,6 @@ namespace ProtoComm
 	private:
 		void ChannelEventHandler(ICommProtocol::ChannelId channelId, ICommProtocol::ChannelEventType eventType)
 		{
-
 			if (eventType == ICommProtocol::ChannelEventType::ChannelAdded)
 			{
 				if (this->GetChannelById(channelId))

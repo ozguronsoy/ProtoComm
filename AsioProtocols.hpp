@@ -237,6 +237,7 @@ namespace ProtoComm
 
 	private:
 		void RunAcceptor();
+		void RunAcceptorContext();
 		void RunIoContext();
 		void CleanFinishedThreads();
 		Channel& FindChannel(ICommProtocol::ChannelId channelId);
