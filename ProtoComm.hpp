@@ -854,7 +854,7 @@ namespace ProtoComm
 			if (!callback)
 				throw std::invalid_argument("callback cannot be null");
 
-			std::vector<uint8_t> buffer;
+			auto buffer = std::make_shared<std::vector<uint8_t>>();
 			std::vector<uint8_t> messagePositions(messages.size());
 			for (size_t i = 0; i < messages.size(); ++i)
 			{
@@ -865,13 +865,13 @@ namespace ProtoComm
 
 				msg.Pack(frame);
 				frameHandler.Seal(msg, frame);
-				buffer.insert(buffer.end(), frame.begin(), frame.end());
+				buffer->insert(buffer->end(), frame.begin(), frame.end());
 				if ((i + 1) < messages.size())
 					messagePositions[i + 1] = messagePositions[i] + frame.size();
 			}
 
-			m_protocol.WriteAsync(ch->id, buffer,
-				[this, ch, callback, messagePositions](const std::error_code& ec, ICommProtocol::ChannelId channelId, size_t size)
+			m_protocol.WriteAsync(ch->id, *buffer,
+				[this, ch, callback, buffer, messagePositions](const std::error_code& ec, ICommProtocol::ChannelId channelId, size_t size)
 				{
 					auto it = std::find_if(messagePositions.begin(), messagePositions.end(), [size](size_t p) { return p >= size; });
 					const size_t writtenMessageCount = static_cast<size_t>(std::distance(messagePositions.begin(), it));
@@ -934,7 +934,7 @@ namespace ProtoComm
 
 				auto it = std::find_if(m_channels.begin(), m_channels.end(), [channelId](const auto& ch) { return ch->id == channelId; });
 				if (it == m_channels.end())
-					std::invalid_argument("channel not found");
+					throw std::invalid_argument("channel not found");
 				(void)m_channels.erase(it);
 			}
 			else

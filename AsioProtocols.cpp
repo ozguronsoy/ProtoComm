@@ -119,7 +119,7 @@ namespace ProtoComm
 			throw std::logic_error("channel event callback must be set before starting the protocol");
 
 		if (std::find_if(m_channels.begin(), m_channels.end(), [&portName](const Channel& channel) { return channel.portName == portName; }) != m_channels.end())
-			return false;
+			return std::nullopt;
 
 		Channel& ch = m_channels.emplace_back(m_ioCtx, portName);
 		try

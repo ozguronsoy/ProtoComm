@@ -20,7 +20,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y g++ cmake libasio-dev socat
+          sudo apt install -y g++ cmake libasio-dev socat qt6-base-dev qt6-serialport-dev
 
       - name: Configure CMake
         run: cmake -S test -B test/build
@@ -47,7 +47,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y clang-18 g++ cmake libasio-dev socat
+          sudo apt install -y clang-18 g++ cmake libasio-dev socat qt6-base-dev qt6-serialport-dev
 
           sudo update-alternatives --install /usr/bin/cc cc /usr/bin/clang-18 100
           sudo update-alternatives --install /usr/bin/c++ c++ /usr/bin/clang++-18 100

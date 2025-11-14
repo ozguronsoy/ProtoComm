@@ -178,14 +178,14 @@ public:
     float gz = 0;
 };
 
-float GenerateRandomFloat()
+static float GenerateRandomFloat()
 {
     static std::mt19937 generator(std::random_device{}());
     static std::uniform_real_distribution<float> distribution(0.0f, 1000.0f);
     return distribution(generator);
 }
 
-size_t GenerateTxMessages(
+static size_t GenerateTxMessages(
     size_t msgCountPerType,
     std::span<TelemetryMessage> telemetryMessages,
     std::span<ImuMessage> imuMessages)

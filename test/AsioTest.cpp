@@ -1,5 +1,4 @@
 #include <gtest/gtest.h>
-#include <random>
 #include "TestUtils.hpp"
 #include "AsioProtocols.hpp"
 
@@ -70,11 +69,9 @@ TEST(AsioSerial, LoopbackAsync)
     }
 
     auto fw = stream.WriteAsync(writeChannel, txMessages);
-    fw.wait_for(std::chrono::milliseconds(5000));
     const size_t txCount = fw.get();
     EXPECT_EQ(txCount, totalMsgCount);
 
-    fr.wait_for(std::chrono::milliseconds(5000));
     auto rxMessages = fr.get();
 
     EXPECT_EQ(rxMessages.size(), totalMsgCount);
