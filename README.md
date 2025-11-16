@@ -1,5 +1,7 @@
 # ProtoComm
 
+[![Test](https://github.com/ozguronsoy/ProtoComm/actions/workflows/test.yaml/badge.svg)](https://github.com/ozguronsoy/ProtoComm/actions/workflows/test.yaml)
+
 A header-only modern C++ library designed for message-based communication with hardware or services. Intended for use in applications running on Embedded Linux devices as well as high-performance platforms like PCs, Macs, and smartphones.
 
 ``ProtoComm`` can be used in a variety of scenarios, such as a ground station communicating with a rocket, UAV, or drone for real-time data exchange and control.
