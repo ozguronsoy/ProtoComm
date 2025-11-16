@@ -32,6 +32,7 @@ add_executable(
     ../AsioProtocols.cpp
     ../QtProtocols.cpp
     
+    ProtoCommTest.cpp
     AsioTest.cpp
     QtTest.cpp
     test_main.cpp

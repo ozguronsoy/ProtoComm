@@ -286,12 +286,12 @@ public:
 
 	size_t Read(ICommProtocol::ChannelId channelId, std::span<uint8_t> buffer) override
 	{
-		throw std::logic_error("LoopbackProtocol::Read is not implemented.");
+		throw std::logic_error("CustomProtocol::Read is not implemented.");
 	}
 
 	void Write(ICommProtocol::ChannelId channelId, std::span<const uint8_t> buffer) override
 	{
-		throw std::logic_error("LoopbackProtocol::Write is not implemented.");
+		throw std::logic_error("CustomProtocol::Write is not implemented.");
 	}
 
 	// asynchronous io not implemented for this example

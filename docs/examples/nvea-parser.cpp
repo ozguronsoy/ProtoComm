@@ -303,12 +303,12 @@ public:
     // asynchronous io not implemented for this example
     void ReadAsync(ICommProtocol::ChannelId channelId, ICommProtocol::ReadCallback callback) override
     {
-        throw std::logic_error("LoopbackProtocol::ReadAsync is not implemented.");
+        throw std::logic_error("CustomProtocol::ReadAsync is not implemented.");
     }
 
     void WriteAsync(ICommProtocol::ChannelId channelId, std::span<const uint8_t> buffer, ICommProtocol::WriteCallback callback) override
     {
-        throw std::logic_error("LoopbackProtocol::WriteAsync is not implemented.");
+        throw std::logic_error("CustomProtocol::WriteAsync is not implemented.");
     }
 
 private:
