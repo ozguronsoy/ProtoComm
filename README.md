@@ -34,6 +34,7 @@ A header-only modern C++ library designed for message-based communication with h
 
 - **Optional Implementations:** Get started immediately with optional protocol implementations for ``asio`` and ``Qt``.
 
+- **Modules support:** Use modules with C++20 and later.
 
 ## Dependencies
 
@@ -52,8 +53,12 @@ The protocol implementations are optional and require the respective libraries.
 
 A collection of examples demonstrating how to implement your own messages, protocols, and frame handlers can be found in the [docs/examples](docs/examples) directory.
 
-
-
+The following options can be toggled in `CMakeLists.txt`:
+- `PROTOCOMM_BUILD_ASIO`, for building Asio protocol implementations
+- `PROTOCOMM_BUILD_QT`, for building Qt protocol implementations
+- `PROTOCOMM_BUILD_MODULES`, for building the C++ modules
+- `PROTOCOMM_BUILD_TESTS`, for building library tests
+- `PROTOCOMM_BUILD_EXAMPLES`, for building library examples
 
 ## Roadmap
 
