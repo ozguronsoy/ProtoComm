@@ -24,10 +24,10 @@ jobs:
           sudo apt install -y g++ cmake libasio-dev socat qt6-base-dev qt6-serialport-dev
 
       - name: Configure CMake
-        run: cmake -S test -B test/build
+        run: cmake -S . -B build -DPROTOCOMM_BUILD_TESTS=ON
 
       - name: Build
-        run: cmake --build test/build
+        run: cmake --build build
 
       - name: Run
         run: |
@@ -35,8 +35,8 @@ jobs:
           sudo socat -d -d pty,raw,echo=0,link=/dev/ttyS10 pty,raw,echo=0,link=/dev/ttyS11 &
           echo "Waiting for ports to initialize..."
           sleep 2
-          echo "Running test..."
-          sudo test/build/ProtoCommTest
+          echo "Running tests..."
+          cd build && sudo ctest --output-on-failure
 
   clang:
     runs-on: ubuntu-latest
@@ -61,10 +61,10 @@ jobs:
         env:
           CC: /usr/bin/clang-18
           CXX: /usr/bin/clang++-18
-        run: cmake -S test -B test/build
+        run: cmake -S . -B build -DPROTOCOMM_BUILD_TESTS=ON
 
       - name: Build
-        run: cmake --build test/build
+        run: cmake --build build
 
       - name: Run
         run: |
@@ -72,5 +72,5 @@ jobs:
           sudo socat -d -d pty,raw,echo=0,link=/dev/ttyS10 pty,raw,echo=0,link=/dev/ttyS11 &
           echo "Waiting for ports to initialize..."
           sleep 2
-          echo "Running test..."
-          sudo test/build/ProtoCommTest
+          echo "Running tests..."
+          cd build && sudo ctest --output-on-failure

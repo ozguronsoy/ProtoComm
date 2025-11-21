@@ -11,7 +11,7 @@ FetchContent_MakeAvailable(googletest)
 # Enable testing
 include(GoogleTest)
 
-# Core tests
+# Core tests (uses Qt for test_main initialization)
 add_executable(ProtoCommTest
     ProtoCommTest.cpp
     test_main.cpp
@@ -20,8 +20,11 @@ add_executable(ProtoCommTest
 target_link_libraries(ProtoCommTest PRIVATE
     ProtoComm::ProtoComm
     gtest
-    gtest_main
 )
+
+if(TARGET Qt6::Core)
+    target_link_libraries(ProtoCommTest PRIVATE Qt6::Core)
+endif()
 
 gtest_discover_tests(ProtoCommTest)
 
@@ -29,7 +32,6 @@ gtest_discover_tests(ProtoCommTest)
 if(TARGET ProtoComm::Asio)
     add_executable(AsioTest
         AsioTest.cpp
-        test_main.cpp
     )
 
     target_link_libraries(AsioTest PRIVATE
@@ -51,7 +53,6 @@ if(TARGET ProtoComm::Qt)
     target_link_libraries(QtTest PRIVATE
         ProtoComm::Qt
         gtest
-        gtest_main
     )
 
     gtest_discover_tests(QtTest)
