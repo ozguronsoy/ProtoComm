@@ -1,0 +1,20 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# Find dependencies based on what was built
+if(@PROTOCOMM_BUILD_ASIO@)
+    find_dependency(asio QUIET)
+    if(NOT asio_FOUND)
+        find_dependency(Boost QUIET COMPONENTS system)
+    endif()
+endif()
+
+if(@PROTOCOMM_BUILD_QT@)
+    find_dependency(Qt6 COMPONENTS Core SerialPort)
+endif()
+
+# Include the targets file
+include("${CMAKE_CURRENT_LIST_DIR}/ProtoCommTargets.cmake")
+
+check_required_components(ProtoComm)

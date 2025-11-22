@@ -1,16 +1,4 @@
-cmake_minimum_required(VERSION 3.28)
-
-project(ProtoCommTest LANGUAGES CXX)
-
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-set(CMAKE_AUTOMOC ON)
-set(CMAKE_AUTORCC ON)
-set(CMAKE_AUTOUIC ON)
-
-find_package(Qt6 REQUIRED COMPONENTS Core SerialPort)
-
+# Fetch GoogleTest
 include(FetchContent)
 FetchContent_Declare(
     googletest
@@ -20,29 +8,48 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(googletest)
 
-include_directories(
-    ${CMAKE_CURRENT_LIST_DIR}
-    ${CMAKE_CURRENT_LIST_DIR}/..
-    ${GTEST_INCLUDE_DIRS}
-)
+# Enable testing
+include(GoogleTest)
 
-add_executable(
-    ProtoCommTest
-    
-    ../AsioProtocols.cpp
-    ../QtProtocols.cpp
-    
+# Core tests (header-only, no Qt needed)
+add_executable(ProtoCommTest
     ProtoCommTest.cpp
-    AsioTest.cpp
-    QtTest.cpp
-    test_main.cpp
 )
 
-target_link_libraries(
-    ProtoCommTest PRIVATE
-    
+target_link_libraries(ProtoCommTest PRIVATE
+    ProtoComm::ProtoComm
     gtest
-    
-    Qt6::Core
-    Qt6::SerialPort
+    gtest_main
 )
+
+gtest_discover_tests(ProtoCommTest)
+
+# Asio tests (if Asio support is enabled)
+if(TARGET ProtoComm::Asio)
+    add_executable(AsioTest
+        AsioTest.cpp
+    )
+
+    target_link_libraries(AsioTest PRIVATE
+        ProtoComm::Asio
+        gtest
+        gtest_main
+    )
+
+    gtest_discover_tests(AsioTest)
+endif()
+
+# Qt tests (if Qt support is enabled)
+if(TARGET ProtoComm::Qt)
+    add_executable(QtTest
+        QtTest.cpp
+        test_main.cpp
+    )
+
+    target_link_libraries(QtTest PRIVATE
+        ProtoComm::Qt
+        gtest
+    )
+
+    gtest_discover_tests(QtTest)
+endif()
