@@ -36,7 +36,7 @@ if(PROTOCOMM_BUILD_ASIO)
         )
 
         target_include_directories(ProtoComm_Asio PUBLIC
-            ${ASIO_INCLUDE_DIRS}
+            $<BUILD_INTERFACE:${ASIO_INCLUDE_DIRS}>
             $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>
         )
@@ -52,7 +52,7 @@ if(PROTOCOMM_BUILD_ASIO)
             target_link_libraries(ProtoComm_Asio PUBLIC pthread)
         endif()
 
-        target_compile_definitions(ProtoComm_Asio PUBLIC ASIO_STANDALONE)
+        target_compile_definitions(ProtoComm_Asio PUBLIC ASIO_STANDALONE PROTOCOMM_BUILD_ASIO)
 
         # Installation
         install(TARGETS ProtoComm_Asio
