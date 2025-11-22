@@ -53,6 +53,7 @@ if(TARGET ProtoComm::Qt)
     target_link_libraries(QtTest PRIVATE
         ProtoComm::Qt
         gtest
+        gtest_main
     )
 
     gtest_discover_tests(QtTest)
